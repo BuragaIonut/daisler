@@ -46,7 +46,7 @@ logging.basicConfig(
 logger = logging.getLogger("print-analyzer")
 
 # Discover and load .env, then log the resolved path
-_resolved_env = find_dotenv(usecwd=True)
+_resolved_env = find_dotenv(".env.local")
 if not _resolved_env:
     fallback = Path(__file__).resolve().parent / ".env"
     if fallback.exists():
@@ -56,7 +56,6 @@ if _resolved_env:
     # Use utf-8-sig to tolerate BOM in files saved with a BOM on Windows
     load_dotenv(_resolved_env, override=True, encoding="utf-8-sig")
 logger.info(f"dotenv loaded from: {_resolved_env or 'not found'}")
-
 # Log OPENAI_API_KEY presence (masked) to help diagnose env issues
 _k = os.getenv("OPENAI_API_KEY")
 if _k:
