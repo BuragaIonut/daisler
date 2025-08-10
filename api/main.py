@@ -262,3 +262,50 @@ async def process_image_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/resize")
+async def resize_image_endpoint(
+    file: UploadFile = File(...),
+    width: float = Form(...),
+    height: float = Form(...),
+    dpi: int = Form(...),
+    unit: str = Form("mm"),
+):
+    """Resize an image to target physical dimensions at a given DPI.
+
+    - width/height: physical size (in mm or inch based on `unit`)
+    - dpi: dots per inch
+    Returns PNG image of computed pixel size.
+    """
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    if width <= 0 or height <= 0 or dpi <= 0:
+        raise HTTPException(status_code=400, detail="width, height and dpi must be positive")
+
+    try:
+        raw = await file.read()
+        pil = Image.open(BytesIO(raw)).convert("RGB")
+        u = (unit or "mm").strip().lower()
+        if u not in ("mm", "inch", "in", "inches"):
+            raise HTTPException(status_code=400, detail="unit must be mm or inch")
+        if u == "mm":
+            width_in = width / 25.4
+            height_in = height / 25.4
+        else:
+            width_in = width
+            height_in = height
+
+        target_w = max(1, int(round(width_in * dpi)))
+        target_h = max(1, int(round(height_in * dpi)))
+
+        resized = pil.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        resized.save(buf, format="PNG")
+        return Response(content=buf.getvalue(), media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("resize failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+

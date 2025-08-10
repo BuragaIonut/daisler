@@ -30,6 +30,10 @@ export default function Home() {
   const [toSendPreviewUrl, setToSendPreviewUrl] = useState<string | null>(null);
   const [toSendType, setToSendType] = useState<string>("image/png");
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
+  const [resizeWidth, setResizeWidth] = useState<string>("");
+  const [resizeHeight, setResizeHeight] = useState<string>("");
+  const [resizeDpi, setResizeDpi] = useState<string>("300");
+  const [resizeUnit, setResizeUnit] = useState<string>("mm");
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
 
@@ -563,6 +567,87 @@ export default function Home() {
               </button>
             )}
 
+            {/* Resize controls */}
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+            <div>
+              <label className="block text-xs mb-1">X</label>
+              <input value={resizeWidth} onChange={(e) => setResizeWidth(e.target.value)} placeholder="lățime"
+                     className="w-full rounded-lg p-2 bg-transparent border border-white/10" />
+            </div>
+            <div>
+              <label className="block text-xs mb-1">Y</label>
+              <input value={resizeHeight} onChange={(e) => setResizeHeight(e.target.value)} placeholder="înălțime"
+                     className="w-full rounded-lg p-2 bg-transparent border border-white/10" />
+            </div>
+            <div>
+              <label className="block text-xs mb-1">DPI</label>
+              <input value={resizeDpi} onChange={(e) => setResizeDpi(e.target.value)} placeholder="dpi" 
+                     className="w-full rounded-lg p-2 bg-transparent border border-white/10" />
+            </div>
+            <div>
+              <label className="block text-xs mb-1">Unitate</label>
+              <select value={resizeUnit} onChange={(e) => setResizeUnit(e.target.value)}
+                      className="w-full rounded-lg p-2 bg-transparent border border-white/10">
+                <option value="mm">mm</option>
+                <option value="inch">inch</option>
+              </select>
+            </div>
+            <div className="col-span-2 md:col-span-1">
+              <button type="button" className="btn-secondary w-full whitespace-nowrap text-sm" disabled={!imageSrc}
+                onClick={async () => {
+                  if (!imageSrc) return;
+                  setError(null);
+                  setProcessedUrl(null);
+                  try {
+                    // input parsing
+                    const w = parseFloat(resizeWidth);
+                    const h = parseFloat(resizeHeight);
+                    const d = parseInt(resizeDpi, 10);
+                    if (!(w > 0 && h > 0 && d > 0)) {
+                      throw new Error("Valori invalid dimensionare");
+                    }
+                    let toSend: File | null = null;
+                    if (isValidSelection(selection) && containerRef.current && naturalSize) {
+                      const rect = containerRef.current.getBoundingClientRect();
+                      const scaleX = naturalSize.width / rect.width;
+                      const scaleY = naturalSize.height / rect.height;
+                      const cropPixels = {
+                        x: Math.max(0, Math.floor(selection.x * scaleX)),
+                        y: Math.max(0, Math.floor(selection.y * scaleY)),
+                        width: Math.max(1, Math.floor(selection.width * scaleX)),
+                        height: Math.max(1, Math.floor(selection.height * scaleY)),
+                      };
+                      const blob = await getCroppedBlob(imageSrc, cropPixels);
+                      toSend = new File([blob], "crop.png", { type: "image/png" });
+                    } else {
+                      const res = await fetch(imageSrc);
+                      const blob = await res.blob();
+                      toSend = new File([blob], "image.png", { type: blob.type || "image/png" });
+                    }
+                    const form = new FormData();
+                    form.append("file", toSend);
+                    form.append("width", String(w));
+                    form.append("height", String(h));
+                    form.append("dpi", String(d));
+                    form.append("unit", resizeUnit);
+                    const resz = await fetch(`${BACKEND_URL}/resize`, { method: "POST", body: form });
+                    if (!resz.ok) {
+                      const t = await resz.text();
+                      throw new Error(t || `Resize failed (${resz.status})`);
+                    }
+                    const outBlob = await resz.blob();
+                    setProcessedUrl(URL.createObjectURL(outBlob));
+                  } catch (err: unknown) {
+                    const message = err instanceof Error ? err.message : "Resize error";
+                    setError(message);
+                  }
+                }}
+              >
+                Redimensionează
+              </button>
+            </div>
           </div>
         </form>
         {error && (

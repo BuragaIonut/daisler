@@ -96,7 +96,7 @@ body {
 .btn-secondary {
   background: linear-gradient(180deg, #ffd8a8, #ffb86b);
   color: #5a3a17;
-  padding: 0.6rem 1rem;
+  padding: 0.55rem 0.9rem;
   border-radius: 10px;
   font-weight: 600;
   border: 1px solid rgba(0,0,0,0.06);
