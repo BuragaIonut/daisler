@@ -1,10 +1,8 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageDraw
 from io import BytesIO
 import base64
 import logging
@@ -12,6 +10,7 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
+import fitz  # PyMuPDF
 
 class AnalysisResponse(BaseModel):
     result: str
@@ -151,6 +150,40 @@ async def analyze_endpoint(
 
     try:
         result_text = analyze_image_with_openai(image, use_case)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return AnalysisResponse(result=result_text)
+
+
+@app.post("/analyze_pdf", response_model=AnalysisResponse)
+async def analyze_pdf_endpoint(
+    file: UploadFile = File(...),
+    use_case: str = Form(""),
+):
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Unsupported file type; expected application/pdf")
+
+    raw = await file.read()
+    try:
+        # Render first page of PDF to an image using PyMuPDF
+        pdf = fitz.open(stream=raw, filetype="pdf")
+        if pdf.page_count == 0:
+            raise HTTPException(status_code=400, detail="Empty PDF")
+        page = pdf.load_page(0)
+        # Use a matrix to render at higher DPI for better analysis
+        zoom = 2.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        mode = "RGB" if pix.n < 4 else "RGBA"
+        pil_image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+        if pil_image.mode != "RGB":
+            pil_image = pil_image.convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid PDF: {exc}")
+
+    try:
+        result_text = analyze_image_with_openai(pil_image, use_case or "PDF page analysis")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

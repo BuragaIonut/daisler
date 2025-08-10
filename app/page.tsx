@@ -1,14 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import NextImage from "next/image";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+  const [zoom, setZoom] = useState<number>(1);
+  const [transformOrigin, setTransformOrigin] = useState<string>("center center");
   const [selecting, setSelecting] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(
     null
@@ -42,7 +46,7 @@ export default function Home() {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.addEventListener("load", () => resolve(img));
-      img.addEventListener("error", (e) => reject(e));
+      img.addEventListener("error", (e: Event) => reject(e));
       img.crossOrigin = "anonymous";
       img.src = src;
     });
@@ -55,10 +59,38 @@ export default function Home() {
     return () => window.removeEventListener("mouseup", onWinMouseUp);
   }, []);
 
+  // Prevent page scroll and zoom the image when the wheel is used over the image container.
+  // Zoom towards mouse pointer by setting transform-origin to the pointer location.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const pointerX = e.clientX - rect.left;
+      const pointerY = e.clientY - rect.top;
+      setTransformOrigin(`${pointerX}px ${pointerY}px`);
+      const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9; // smooth multiplicative zoom
+      setZoom((prevZoom) => Math.min(5, Math.max(0.2, Number((prevZoom * zoomFactor).toFixed(3)))));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel as EventListener);
+  }, [imageSrc, naturalSize]);
+
+  // Reset pan when a new image is loaded
+  useEffect(() => {
+    setTransformOrigin("center center");
+    setZoom(1);
+  }, [imageSrc]);
+
   function maybeClearTinySelection() {
     if (selection && (selection.width < 8 || selection.height < 8)) {
       setSelection(null);
     }
+  }
+
+  function isValidSelection(sel: { x: number; y: number; width: number; height: number } | null): sel is { x: number; y: number; width: number; height: number } {
+    return !!sel && sel.width >= 8 && sel.height >= 8;
   }
 
   async function getCroppedBlob(
@@ -99,6 +131,11 @@ export default function Home() {
     } catch {}
   }
 
+  // Cleanup any created PDF object URL
+  useEffect(() => {
+    return () => revokeUrl(pdfUrl);
+  }, [pdfUrl]);
+
   async function refreshToSendPreview() {
     if (!imageSrc) {
       revokeUrl(toSendPreviewUrl);
@@ -106,15 +143,14 @@ export default function Home() {
       return;
     }
     try {
-      if (selection) {
-        const imgEl = imgRef.current;
+      if (isValidSelection(selection)) {
         const contEl = containerRef.current;
-        if (!imgEl || !contEl) return;
-        const naturalW = imgEl.naturalWidth;
-        const naturalH = imgEl.naturalHeight;
+        if (!contEl || !naturalSize) return;
+        const naturalW = naturalSize.width;
+        const naturalH = naturalSize.height;
         const rect = contEl.getBoundingClientRect();
         const displayedW = rect.width;
-        const displayedH = imgEl.getBoundingClientRect().height;
+        const displayedH = rect.height;
         const scaleX = naturalW / displayedW;
         const scaleY = naturalH / displayedH;
         const cropPixels = {
@@ -129,13 +165,9 @@ export default function Home() {
         setToSendPreviewUrl(url);
         setToSendType(blob.type || "image/png");
       } else {
-        // Preview original
-        const res = await fetch(imageSrc);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
+        // No valid crop → do not show preview
         revokeUrl(toSendPreviewUrl);
-        setToSendPreviewUrl(url);
-        setToSendType(blob.type || "image/png");
+        setToSendPreviewUrl(null);
       }
     } catch {}
   }
@@ -153,14 +185,13 @@ export default function Home() {
     let fileToSend: File | null = file;
     try {
       if (imageSrc && selection) {
-        const imgEl = imgRef.current;
         const contEl = containerRef.current;
-        if (imgEl && contEl) {
-          const naturalW = imgEl.naturalWidth;
-          const naturalH = imgEl.naturalHeight;
+        if (contEl && naturalSize) {
+          const naturalW = naturalSize.width;
+          const naturalH = naturalSize.height;
           const rect = contEl.getBoundingClientRect();
           const displayedW = rect.width;
-          const displayedH = imgEl.getBoundingClientRect().height;
+          const displayedH = rect.height;
 
           const scaleX = naturalW / displayedW;
           const scaleY = naturalH / displayedH;
@@ -176,8 +207,9 @@ export default function Home() {
           fileToSend = new File([blob], "crop.png", { type: "image/png" });
         }
       }
-    } catch (err: any) {
-      setError(err.message || "Crop failed");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Crop failed";
+      setError(message);
       return;
     }
 
@@ -193,19 +225,27 @@ export default function Home() {
       return;
     }
 
-    // Ensure preview matches exactly what is being sent
+    // Ensure preview matches exactly what is being sent (only for images)
     try {
-      const url = URL.createObjectURL(fileToSend);
-      revokeUrl(toSendPreviewUrl);
-      setToSendPreviewUrl(url);
-      setToSendType(fileToSend.type || "image/png");
+      if (fileToSend.type && fileToSend.type.startsWith("image/")) {
+        const url = URL.createObjectURL(fileToSend);
+        revokeUrl(toSendPreviewUrl);
+        setToSendPreviewUrl(url);
+        setToSendType(fileToSend.type || "image/png");
+      } else {
+        // Non-image: clear preview
+        revokeUrl(toSendPreviewUrl);
+        setToSendPreviewUrl(null);
+      }
     } catch {}
 
     form.append("file", fileToSend);
     form.append("use_case", useCase);
     setLoading(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/analyze`, {
+      const isPdf = file && file.type === 'application/pdf';
+      const endpoint = isPdf ? `${BACKEND_URL}/analyze_pdf` : `${BACKEND_URL}/analyze`;
+      const res = await fetch(endpoint, {
         method: "POST",
         body: form,
       });
@@ -215,8 +255,9 @@ export default function Home() {
       }
       const data = await res.json();
       setResult(data.result ?? "No result");
-    } catch (err: any) {
-      setError(err.message || "Unexpected error");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unexpected error";
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -234,14 +275,13 @@ export default function Home() {
     let fileToSend: File | null = file;
     try {
       if (imageSrc && selection) {
-        const imgEl = imgRef.current;
         const contEl = containerRef.current;
-        if (imgEl && contEl) {
-          const naturalW = imgEl.naturalWidth;
-          const naturalH = imgEl.naturalHeight;
+        if (contEl && naturalSize) {
+          const naturalW = naturalSize.width;
+          const naturalH = naturalSize.height;
           const rect = contEl.getBoundingClientRect();
           const displayedW = rect.width;
-          const displayedH = imgEl.getBoundingClientRect().height;
+          const displayedH = rect.height;
           const scaleX = naturalW / displayedW;
           const scaleY = naturalH / displayedH;
           const cropPixels = {
@@ -254,8 +294,9 @@ export default function Home() {
           fileToSend = new File([blob], "crop.png", { type: "image/png" });
         }
       }
-    } catch (err: any) {
-      setError(err.message || "Crop failed");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Crop failed";
+      setError(message);
       return;
     }
 
@@ -282,8 +323,9 @@ export default function Home() {
       const blob = await res.blob();
       if (processedUrl) URL.revokeObjectURL(processedUrl);
       setProcessedUrl(URL.createObjectURL(blob));
-    } catch (err: any) {
-      setError(err.message || "Processing error");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Processing error";
+      setError(message);
     }
   };
 
@@ -295,41 +337,70 @@ export default function Home() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setHealthStatus(`Status: ${data.status}`);
-    } catch (err: any) {
-      setHealthStatus(`Error: ${err.message || "Unknown error"}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setHealthStatus(`Error: ${message}`);
     } finally {
       setCheckingHealth(false);
     }
   };
 
   return (
-    <div className="mx-auto max-w-[1400px] px-6">
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <div className="mx-auto max-w-[1800px] px-8 py-8">
+      <header className="mb-8">
+        <h1 className="text-3xl font-bold heading">Daisler Print Processor</h1>
+      </header>
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
         <div className="card p-6">
-        <h2 className="text-xl font-semibold mb-2">Analyze your artwork</h2>
-        <p className="text-sm text-[var(--muted)] mb-6">
-          Upload an image and tell us the intended use. We’ll check format, text, composition, centering, and bleed.
-        </p>
+        <h2 className="text-xl font-semibold mb-2">Analizează/Procesează fișierul</h2>
         <form onSubmit={onSubmit} className="space-y-5">
           <div>
-            <label className="block text-sm font-medium mb-2">Image (jpeg/jpg/png)</label>
+            <label className="block text-sm font-medium mb-2">Fișier (imagine: jpeg/jpg/png sau PDF)</label>
             <div className="glass rounded-lg p-3">
               <input
                 type="file"
-                accept="image/jpeg,image/jpg,image/png"
+                accept="image/jpeg,image/jpg,image/png,application/pdf"
                 onChange={async (e) => {
                   const f = e.target.files?.[0] ?? null;
                   setFile(f);
                   if (f) {
-                    const dataUrl = await readFileToDataURL(f);
-                    setImageSrc(dataUrl);
-                    setSelection(null);
-                    setStartPoint(null);
-                    revokeUrl(toSendPreviewUrl);
-                    setToSendPreviewUrl(null);
+                    if (f.type === 'application/pdf') {
+                      // PDF flow
+                      revokeUrl(pdfUrl);
+                      const url = URL.createObjectURL(f);
+                      setPdfUrl(url);
+                      // reset image-related state
+                      setImageSrc(null);
+                      setNaturalSize(null);
+                      setSelection(null);
+                      setStartPoint(null);
+                      setZoom(1);
+                      revokeUrl(toSendPreviewUrl);
+                      setToSendPreviewUrl(null);
+                    } else {
+                      // Image flow
+                      revokeUrl(pdfUrl);
+                      setPdfUrl(null);
+                      const dataUrl = await readFileToDataURL(f);
+                      setImageSrc(dataUrl);
+                      try {
+                        const img = await createImage(dataUrl);
+                        setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+                      } catch {
+                        setNaturalSize(null);
+                      }
+                      setSelection(null);
+                      setStartPoint(null);
+                      setZoom(1);
+                      revokeUrl(toSendPreviewUrl);
+                      setToSendPreviewUrl(null);
+                    }
                   } else {
                     setImageSrc(null);
                     setSelection(null);
+                    revokeUrl(pdfUrl);
+                    setPdfUrl(null);
+                    setNaturalSize(null);
                   }
                 }}
                 className="block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-[var(--accent)] file:text-white file:px-3 file:py-1.5"
@@ -338,9 +409,10 @@ export default function Home() {
           </div>
           {imageSrc && (
             <div
-              className="relative rounded-lg overflow-hidden glass"
+              className="relative rounded-lg overflow-hidden glass w-full"
+              style={{ aspectRatio: naturalSize ? `${naturalSize.width} / ${naturalSize.height}` : "4 / 3" }}
               ref={containerRef}
-              onMouseDown={(e) => {
+               onMouseDown={(e: React.MouseEvent<HTMLDivElement>) => {
                 const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
                 setSelecting(true);
                 const x = e.clientX - rect.left;
@@ -348,7 +420,7 @@ export default function Home() {
                 setStartPoint({ x, y });
                 setSelection({ x, y, width: 0, height: 0 });
               }}
-              onMouseMove={(e) => {
+               onMouseMove={(e: React.MouseEvent<HTMLDivElement>) => {
                 if (!selecting || !startPoint) return;
                 const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
                 let x = e.clientX - rect.left;
@@ -371,12 +443,16 @@ export default function Home() {
                 maybeClearTinySelection();
               }}
             >
-              <img
-                ref={imgRef}
+              <NextImage
                 src={imageSrc}
                 alt="preview"
-                className="w-full h-auto max-h-[75vh] object-contain block select-none"
+                fill
+                unoptimized
+                priority
+                className="object-contain select-none"
+                sizes="(max-width: 1024px) 100vw, 50vw"
                 draggable={false}
+                style={{ transform: `scale(${zoom})`, transformOrigin }}
               />
               {selection && selection.width > 2 && selection.height > 2 && (
                 <div
@@ -391,11 +467,16 @@ export default function Home() {
               )}
             </div>
           )}
+          {!imageSrc && pdfUrl && (
+            <div className="relative rounded-lg overflow-hidden glass w-full">
+              <iframe title="pdf-preview" src={pdfUrl} className="w-full h-[75vh] rounded" />
+            </div>
+          )}
           <div>
-            <label className="block text-sm font-medium mb-2">Use case</label>
+            <label className="block text-sm font-medium mb-2">Descrieți scopul utilizării</label>
             <input
               type="text"
-              placeholder="e.g., business card, poster, tshirt, sticker"
+              placeholder="ex.: carte de vizită, poster, tricou, autocolant"
               value={useCase}
               onChange={(e) => setUseCase(e.target.value)}
               className="w-full rounded-lg p-3 bg-transparent border border-white/10 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
@@ -405,41 +486,40 @@ export default function Home() {
             <button
               type="submit"
               disabled={loading}
-              className="btn-primary disabled:opacity-60"
+              className="btn-primary disabled:opacity-60 min-w-36"
             >
-              {loading ? "Analyzing..." : "Analyze artwork"}
+              {loading ? "Se analizează..." : "Analizează"}
             </button>
             <button
               type="button"
               onClick={onProcess}
-              className="btn-primary disabled:opacity-60"
+              className="btn-secondary disabled:opacity-60 min-w-36"
+              disabled={!!pdfUrl}
             >
-              Process (bleed + cut)
+              Procesează
             </button>
-            {imageSrc && selection && (
+            {imageSrc && isValidSelection(selection) && (
               <button
                 type="button"
                 onClick={() => {
                   setSelection(null);
                   refreshToSendPreview();
                 }}
-                className="text-xs px-3 py-2 rounded border border-white/10 hover:bg-white/5"
+                className="btn-outline text-xs"
               >
-                Clear selection
+                Șterge selecția
               </button>
             )}
-            <button
-              type="button"
-              onClick={checkHealth}
-              disabled={checkingHealth}
-              className="text-xs px-3 py-2 rounded border border-white/10 hover:bg-white/5 disabled:opacity-60"
-            >
-              {checkingHealth ? "Checking..." : "Check API Health"}
-            </button>
-            {healthStatus && (
-              <span className="text-xs text-[var(--muted)]">{healthStatus}</span>
+            {imageSrc && (
+              <button
+                type="button"
+                className="btn-outline text-xs"
+                onClick={() => { setZoom(1); setTransformOrigin("center center"); }}
+              >
+                Reset zoom
+              </button>
             )}
-            <span className="text-xs text-[var(--muted)]">Backend: {BACKEND_URL}</span>
+
           </div>
         </form>
         {error && (
@@ -448,36 +528,61 @@ export default function Home() {
         </div>
 
         <div className="card p-6">
-          <h2 className="text-xl font-semibold mb-2">Will be sent to API</h2>
-          {!toSendPreviewUrl && (
-            <p className="text-sm text-[var(--muted)]">Select or crop an image to see the outgoing preview.</p>
-          )}
+          <h2 className="text-xl font-semibold mb-2">Rezultatul analizei/procesării</h2>
+          {/* Preview of the exact image sent to the API (image uploads) */}
           {toSendPreviewUrl && (
-            <img
-              src={toSendPreviewUrl}
-              alt="to-send"
-              className="w-full h-auto max-h-[75vh] object-contain rounded border border-white/10"
-            />
+            <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
+              <NextImage
+                src={toSendPreviewUrl}
+                alt="to-send"
+                fill
+                unoptimized
+                className="object-contain rounded"
+                sizes="(max-width: 1024px) 100vw, 50vw"
+              />
+            </div>
           )}
-          <p className="text-xs text-[var(--muted)] mt-2">Type: {toSendType}</p>
+          {/* For PDFs, show the PDF itself on the right as well */}
+          {!toSendPreviewUrl && pdfUrl && (
+            <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
+              <iframe title="pdf-to-send" src={pdfUrl} className="w-full h-[60vh] rounded" />
+            </div>
+          )}
+          {/* Processed image should appear here on the right side */}
+          {processedUrl && !toSendPreviewUrl && (
+            <div className="relative w-full rounded border border-white/10 mt-4" style={{ aspectRatio: "4 / 3" }}>
+              <NextImage
+                src={processedUrl}
+                alt="processed"
+                fill
+                unoptimized
+                className="object-contain rounded"
+                sizes="(max-width: 1024px) 100vw, 50vw"
+              />
+            </div>
+          )}
+          {processedUrl && toSendPreviewUrl && (
+            <div className="relative w-full rounded border border-white/10 mt-4" style={{ aspectRatio: "4 / 3" }}>
+              <NextImage
+                src={processedUrl}
+                alt="processed"
+                fill
+                unoptimized
+                className="object-contain rounded"
+                sizes="(max-width: 1024px) 100vw, 50vw"
+              />
+            </div>
+          )}
+          {/* Textual analysis result from OpenAI for both images and PDFs */}
+          {result && (
+            <div className="mt-6">
+              <pre className="mt-1 whitespace-pre-wrap text-sm leading-6">{result}</pre>
+            </div>
+          )}
         </div>
       </section>
 
-      <section className="card p-6">
-        <h2 className="text-xl font-semibold mb-2">Results</h2>
-        {!result && (
-          <p className="text-sm text-[var(--muted)]">Results will appear here after analysis.</p>
-        )}
-        {result && (
-          <pre className="mt-3 whitespace-pre-wrap text-sm leading-6">{result}</pre>
-        )}
-        {processedUrl && (
-          <div className="mt-6">
-            <h3 className="text-sm font-medium mb-2">Processed image (with bleed and cut lines)</h3>
-            <img src={processedUrl} alt="processed" className="w-full h-auto max-h-[75vh] object-contain rounded border border-white/10" />
-          </div>
-        )}
-      </section>
+      {/* Removed separate results section; processed image now appears in the right panel above */}
       </div>
   );
 }

@@ -3,4 +3,5 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 Pillow
-openai>=1.0.0
+openai
+PyMuPDF
