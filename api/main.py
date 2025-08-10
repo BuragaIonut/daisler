@@ -207,12 +207,26 @@ async def process_image_endpoint(
     - bleed_px: padding size in pixels to add on each side.
     Returns a PNG image.
     """
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg", "application/pdf"):
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
     raw = await file.read()
     try:
-        pil_image = Image.open(BytesIO(raw)).convert("RGB")
+        if file.content_type == "application/pdf":
+            # Render first page of PDF to image (similar to analyze_pdf)
+            pdf = fitz.open(stream=raw, filetype="pdf")
+            if pdf.page_count == 0:
+                raise HTTPException(status_code=400, detail="Empty PDF")
+            page = pdf.load_page(0)
+            zoom = 2.0
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            mode = "RGB" if pix.n < 4 else "RGBA"
+            pil_image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+            if pil_image.mode != "RGB":
+                pil_image = pil_image.convert("RGB")
+        else:
+            pil_image = Image.open(BytesIO(raw)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image data")
 

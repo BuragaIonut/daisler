@@ -12,7 +12,8 @@ export default function Home() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   const [zoom, setZoom] = useState<number>(1);
-  const [transformOrigin, setTransformOrigin] = useState<string>("center center");
+  const [originX, setOriginX] = useState<number>(0);
+  const [originY, setOriginY] = useState<number>(0);
   const [selecting, setSelecting] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(
     null
@@ -73,7 +74,8 @@ export default function Home() {
       const rect = el.getBoundingClientRect();
       const pointerX = e.clientX - rect.left;
       const pointerY = e.clientY - rect.top;
-      setTransformOrigin(`${pointerX}px ${pointerY}px`);
+      setOriginX(pointerX);
+      setOriginY(pointerY);
       const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9; // smooth multiplicative zoom
       setZoom((prevZoom) => Math.min(5, Math.max(0.2, Number((prevZoom * zoomFactor).toFixed(3)))));
     };
@@ -83,9 +85,59 @@ export default function Home() {
 
   // Reset pan when a new image is loaded
   useEffect(() => {
-    setTransformOrigin("center center");
+    const el = containerRef.current;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setOriginX(rect.width / 2);
+      setOriginY(rect.height / 2);
+    } else {
+      setOriginX(0);
+      setOriginY(0);
+    }
     setZoom(1);
   }, [imageSrc]);
+
+  function computeCropPixelsFromSelection(sel: { x: number; y: number; width: number; height: number } | null) {
+    if (!isValidSelection(sel)) return null;
+    const contEl = containerRef.current;
+    if (!contEl || !naturalSize || !imageSrc) return null;
+    const cw = contEl.clientWidth;
+    const ch = contEl.clientHeight;
+    const iw = naturalSize.width;
+    const ih = naturalSize.height;
+    const baseScale = Math.min(cw / iw, ch / ih) || 1;
+    const bw = iw * baseScale; // base contained width
+    const bh = ih * baseScale; // base contained height
+    const ex = (cw - bw) / 2; // base offset inside container
+    const ey = (ch - bh) / 2;
+    const elementOffsetX = originX * (1 - zoom);
+    const elementOffsetY = originY * (1 - zoom);
+    const imgLeft = elementOffsetX + ex * zoom;
+    const imgTop = elementOffsetY + ey * zoom;
+    const dispW = bw * zoom;
+    const dispH = bh * zoom;
+    const sx = sel.x;
+    const sy = sel.y;
+    const sw = sel.width;
+    const sh = sel.height;
+    // Intersection with image bounds
+    const ix = Math.max(0, Math.min(sx, imgLeft + dispW) - imgLeft);
+    const iy = Math.max(0, Math.min(sy, imgTop + dispH) - imgTop);
+    const ix2 = Math.max(0, Math.min(sx + sw, imgLeft + dispW) - imgLeft);
+    const iy2 = Math.max(0, Math.min(sy + sh, imgTop + dispH) - imgTop);
+    const selWOnImg = Math.max(0, ix2 - ix);
+    const selHOnImg = Math.max(0, iy2 - iy);
+    if (selWOnImg < 1 || selHOnImg < 1) return null;
+    const normX = ix / dispW;
+    const normY = iy / dispH;
+    const normW = selWOnImg / dispW;
+    const normH = selHOnImg / dispH;
+    const px = Math.max(0, Math.floor(normX * iw));
+    const py = Math.max(0, Math.floor(normY * ih));
+    const pw = Math.max(1, Math.floor(normW * iw));
+    const ph = Math.max(1, Math.floor(normH * ih));
+    return { x: px, y: py, width: pw, height: ph };
+  }
 
   function maybeClearTinySelection() {
     if (selection && (selection.width < 8 || selection.height < 8)) {
@@ -148,21 +200,12 @@ export default function Home() {
     }
     try {
       if (isValidSelection(selection)) {
-        const contEl = containerRef.current;
-        if (!contEl || !naturalSize) return;
-        const naturalW = naturalSize.width;
-        const naturalH = naturalSize.height;
-        const rect = contEl.getBoundingClientRect();
-        const displayedW = rect.width;
-        const displayedH = rect.height;
-        const scaleX = naturalW / displayedW;
-        const scaleY = naturalH / displayedH;
-        const cropPixels = {
-          x: Math.max(0, Math.floor(selection.x * scaleX)),
-          y: Math.max(0, Math.floor(selection.y * scaleY)),
-          width: Math.max(1, Math.floor(selection.width * scaleX)),
-          height: Math.max(1, Math.floor(selection.height * scaleY)),
-        };
+        const cropPixels = computeCropPixelsFromSelection(selection);
+        if (!cropPixels) {
+          revokeUrl(toSendPreviewUrl);
+          setToSendPreviewUrl(null);
+          return;
+        }
         const blob = await getCroppedBlob(imageSrc, cropPixels);
         const url = URL.createObjectURL(blob);
         revokeUrl(toSendPreviewUrl);
@@ -189,24 +232,8 @@ export default function Home() {
     let fileToSend: File | null = file;
     try {
       if (imageSrc && selection) {
-        const contEl = containerRef.current;
-        if (contEl && naturalSize) {
-          const naturalW = naturalSize.width;
-          const naturalH = naturalSize.height;
-          const rect = contEl.getBoundingClientRect();
-          const displayedW = rect.width;
-          const displayedH = rect.height;
-
-          const scaleX = naturalW / displayedW;
-          const scaleY = naturalH / displayedH;
-
-          const cropPixels = {
-            x: Math.max(0, Math.floor(selection.x * scaleX)),
-            y: Math.max(0, Math.floor(selection.y * scaleY)),
-            width: Math.max(1, Math.floor(selection.width * scaleX)),
-            height: Math.max(1, Math.floor(selection.height * scaleY)),
-          };
-
+        const cropPixels = computeCropPixelsFromSelection(selection);
+        if (cropPixels) {
           const blob = await getCroppedBlob(imageSrc, cropPixels);
           fileToSend = new File([blob], "crop.png", { type: "image/png" });
         }
@@ -279,21 +306,8 @@ export default function Home() {
     let fileToSend: File | null = file;
     try {
       if (imageSrc && selection) {
-        const contEl = containerRef.current;
-        if (contEl && naturalSize) {
-          const naturalW = naturalSize.width;
-          const naturalH = naturalSize.height;
-          const rect = contEl.getBoundingClientRect();
-          const displayedW = rect.width;
-          const displayedH = rect.height;
-          const scaleX = naturalW / displayedW;
-          const scaleY = naturalH / displayedH;
-          const cropPixels = {
-            x: Math.max(0, Math.floor(selection.x * scaleX)),
-            y: Math.max(0, Math.floor(selection.y * scaleY)),
-            width: Math.max(1, Math.floor(selection.width * scaleX)),
-            height: Math.max(1, Math.floor(selection.height * scaleY)),
-          };
+        const cropPixels = computeCropPixelsFromSelection(selection);
+        if (cropPixels) {
           const blob = await getCroppedBlob(imageSrc, cropPixels);
           fileToSend = new File([blob], "crop.png", { type: "image/png" });
         }
@@ -456,7 +470,7 @@ export default function Home() {
                 className="object-contain select-none"
                 sizes="(max-width: 1024px) 100vw, 50vw"
                 draggable={false}
-                style={{ transform: `scale(${zoom})`, transformOrigin }}
+                style={{ transform: `scale(${zoom})`, transformOrigin: `${originX}px ${originY}px` }}
               />
               {selection && selection.width > 2 && selection.height > 2 && (
                 <div
@@ -498,7 +512,7 @@ export default function Home() {
               type="button"
               onClick={onProcess}
               className="btn-secondary disabled:opacity-60 min-w-36"
-              disabled={!!pdfUrl}
+              disabled={false}
             >
               Procesează
             </button>
@@ -511,16 +525,9 @@ export default function Home() {
                 setError(null);
                 try {
                   let toSend: File | null = null;
-                  if (isValidSelection(selection) && containerRef.current && naturalSize) {
-                    const rect = containerRef.current.getBoundingClientRect();
-                    const scaleX = naturalSize.width / rect.width;
-                    const scaleY = naturalSize.height / rect.height;
-                    const cropPixels = {
-                      x: Math.max(0, Math.floor(selection.x * scaleX)),
-                      y: Math.max(0, Math.floor(selection.y * scaleY)),
-                      width: Math.max(1, Math.floor(selection.width * scaleX)),
-                      height: Math.max(1, Math.floor(selection.height * scaleY)),
-                    };
+                  if (isValidSelection(selection)) {
+                    const cropPixels = computeCropPixelsFromSelection(selection);
+                    if (!cropPixels) throw new Error("Selecție invalidă pentru decupare");
                     const blob = await getCroppedBlob(imageSrc, cropPixels);
                     toSend = new File([blob], "crop.png", { type: "image/png" });
                   } else {
@@ -561,7 +568,7 @@ export default function Home() {
               <button
                 type="button"
                 className="btn-outline text-xs"
-                onClick={() => { setZoom(1); setTransformOrigin("center center"); }}
+                onClick={() => { setZoom(1); const el = containerRef.current; if (el) { const r = el.getBoundingClientRect(); setOriginX(r.width/2); setOriginY(r.height/2);} }}
               >
                 Reset zoom
               </button>
@@ -609,16 +616,9 @@ export default function Home() {
                       throw new Error("Valori invalid dimensionare");
                     }
                     let toSend: File | null = null;
-                    if (isValidSelection(selection) && containerRef.current && naturalSize) {
-                      const rect = containerRef.current.getBoundingClientRect();
-                      const scaleX = naturalSize.width / rect.width;
-                      const scaleY = naturalSize.height / rect.height;
-                      const cropPixels = {
-                        x: Math.max(0, Math.floor(selection.x * scaleX)),
-                        y: Math.max(0, Math.floor(selection.y * scaleY)),
-                        width: Math.max(1, Math.floor(selection.width * scaleX)),
-                        height: Math.max(1, Math.floor(selection.height * scaleY)),
-                      };
+                    if (isValidSelection(selection)) {
+                      const cropPixels = computeCropPixelsFromSelection(selection);
+                      if (!cropPixels) throw new Error("Selecție invalidă pentru redimensionare");
                       const blob = await getCroppedBlob(imageSrc, cropPixels);
                       toSend = new File([blob], "crop.png", { type: "image/png" });
                     } else {
