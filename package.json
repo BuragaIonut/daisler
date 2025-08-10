@@ -6,7 +6,8 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "api": "cd api && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
   },
   "dependencies": {
     "react": "19.1.0",
