@@ -498,6 +498,49 @@ export default function Home() {
             >
               Procesează
             </button>
+            <button
+              type="button"
+              className="btn-secondary disabled:opacity-60 min-w-36"
+              disabled={!imageSrc}
+              onClick={async () => {
+                if (!imageSrc) return;
+                setError(null);
+                try {
+                  let toSend: File | null = null;
+                  if (isValidSelection(selection) && containerRef.current && naturalSize) {
+                    const rect = containerRef.current.getBoundingClientRect();
+                    const scaleX = naturalSize.width / rect.width;
+                    const scaleY = naturalSize.height / rect.height;
+                    const cropPixels = {
+                      x: Math.max(0, Math.floor(selection.x * scaleX)),
+                      y: Math.max(0, Math.floor(selection.y * scaleY)),
+                      width: Math.max(1, Math.floor(selection.width * scaleX)),
+                      height: Math.max(1, Math.floor(selection.height * scaleY)),
+                    };
+                    const blob = await getCroppedBlob(imageSrc, cropPixels);
+                    toSend = new File([blob], "crop.png", { type: "image/png" });
+                  } else {
+                    const res = await fetch(imageSrc);
+                    const blob = await res.blob();
+                    toSend = new File([blob], "image.png", { type: blob.type || "image/png" });
+                  }
+                  const form = new FormData();
+                  form.append("file", toSend);
+                  const res = await fetch(`${BACKEND_URL}/remove_background`, { method: "POST", body: form });
+                  if (!res.ok) {
+                    const t = await res.text();
+                    throw new Error(t || `Remove background failed (${res.status})`);
+                  }
+                  const data = await res.json();
+                  setResult((prev) => `${prev ? prev + "\n\n" : ""}Elimină fundalul: ${data.message}`);
+                } catch (err: unknown) {
+                  const message = err instanceof Error ? err.message : "Background remover error";
+                  setError(message);
+                }
+              }}
+            >
+              Elimină fundalul
+            </button>
             {imageSrc && isValidSelection(selection) && (
               <button
                 type="button"

@@ -190,6 +190,12 @@ async def analyze_pdf_endpoint(
     return AnalysisResponse(result=result_text)
 
 
+@app.post("/remove_background")
+async def remove_background_endpoint(file: UploadFile = File(None)):
+    # Placeholder endpoint – to be implemented
+    return {"message": "Will be implemented soon"}
+
+
 @app.post("/process")
 async def process_image_endpoint(
     file: UploadFile = File(...),
