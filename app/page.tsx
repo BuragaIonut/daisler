@@ -31,6 +31,7 @@ export default function Home() {
   const [toSendPreviewUrl, setToSendPreviewUrl] = useState<string | null>(null);
   const [toSendType, setToSendType] = useState<string>("image/png");
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
+  const [processedType, setProcessedType] = useState<string | null>(null);
   const [resizeWidth, setResizeWidth] = useState<string>("");
   const [resizeHeight, setResizeHeight] = useState<string>("");
   const [resizeDpi, setResizeDpi] = useState<string>("300");
@@ -297,6 +298,7 @@ export default function Home() {
   const onProcess = async () => {
     setError(null);
     setProcessedUrl(null);
+    setProcessedType(null);
     if (!imageSrc && !file) {
       setError("Please select an image first.");
       return;
@@ -341,6 +343,7 @@ export default function Home() {
       const blob = await res.blob();
       if (processedUrl) URL.revokeObjectURL(processedUrl);
       setProcessedUrl(URL.createObjectURL(blob));
+      setProcessedType(blob.type || null);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Processing error";
       setError(message);
@@ -639,6 +642,7 @@ export default function Home() {
                     }
                     const outBlob = await resz.blob();
                     setProcessedUrl(URL.createObjectURL(outBlob));
+                    setProcessedType(outBlob.type || null);
                   } catch (err: unknown) {
                     const message = err instanceof Error ? err.message : "Resize error";
                     setError(message);
@@ -677,28 +681,20 @@ export default function Home() {
             </div>
           )}
           {/* Processed image should appear here on the right side */}
-          {processedUrl && !toSendPreviewUrl && (
+          {processedUrl && (
             <div className="relative w-full rounded border border-white/10 mt-4" style={{ aspectRatio: "4 / 3" }}>
-              <NextImage
-                src={processedUrl}
-                alt="processed"
-                fill
-                unoptimized
-                className="object-contain rounded"
-                sizes="(max-width: 1024px) 100vw, 50vw"
-              />
-            </div>
-          )}
-          {processedUrl && toSendPreviewUrl && (
-            <div className="relative w-full rounded border border-white/10 mt-4" style={{ aspectRatio: "4 / 3" }}>
-              <NextImage
-                src={processedUrl}
-                alt="processed"
-                fill
-                unoptimized
-                className="object-contain rounded"
-                sizes="(max-width: 1024px) 100vw, 50vw"
-              />
+              {processedType === 'application/pdf' ? (
+                <iframe title="processed-pdf" src={processedUrl} className="w-full h-[60vh] rounded" />
+              ) : (
+                <NextImage
+                  src={processedUrl}
+                  alt="processed"
+                  fill
+                  unoptimized
+                  className="object-contain rounded"
+                  sizes="(max-width: 1024px) 100vw, 50vw"
+                />
+              )}
             </div>
           )}
           {/* Textual analysis result from OpenAI for both images and PDFs */}
