@@ -323,3 +323,21 @@ async def resize_image_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+
+@app.post("/image_to_pdf")
+async def image_to_pdf_endpoint(
+    file: UploadFile = File(...),
+):
+    """Convert an uploaded image (PNG/JPEG) to a single-page PDF and return it."""
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(status_code=400, detail="Unsupported file type; expected image/jpeg or image/png")
+
+    try:
+        raw = await file.read()
+        pil = Image.open(BytesIO(raw)).convert("RGB")
+        buf = BytesIO()
+        pil.save(buf, format="PDF")
+        return Response(content=buf.getvalue(), media_type="application/pdf")
+    except Exception as exc:
+        logger.exception("image_to_pdf failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
