@@ -11,6 +11,9 @@ from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
 import fitz  # PyMuPDF
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm, inch
+from reportlab.lib.colors import CMYKColor
 
 class AnalysisResponse(BaseModel):
     result: str
@@ -202,10 +205,10 @@ async def process_image_endpoint(
     bleed_px: int = Form(30),
 ):
     """
-    Add a content-aware bleed (mirror padding) and draw square cutting lines.
+    Add a content-aware bleed (mirror padding) and draw cutting lines with CutContour spot color.
 
     - bleed_px: padding size in pixels to add on each side.
-    Returns a PNG image.
+    Returns a PDF with spot color cut lines.
     """
     if file.content_type not in ("image/jpeg", "image/png", "image/jpg", "application/pdf"):
         raise HTTPException(status_code=400, detail="Unsupported file type")
@@ -214,10 +217,10 @@ async def process_image_endpoint(
     try:
         if file.content_type == "application/pdf":
             # Render first page of PDF to image (similar to analyze_pdf)
-            pdf = fitz.open(stream=raw, filetype="pdf")
-            if pdf.page_count == 0:
+            pdf_doc = fitz.open(stream=raw, filetype="pdf")
+            if pdf_doc.page_count == 0:
                 raise HTTPException(status_code=400, detail="Empty PDF")
-            page = pdf.load_page(0)
+            page = pdf_doc.load_page(0)
             zoom = 2.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
@@ -262,15 +265,37 @@ async def process_image_endpoint(
             expanded.paste(bl, (0, pad + h))
             expanded.paste(br, (pad + w, pad + h))
 
-        # Draw cutting rectangle (green)
-        draw = ImageDraw.Draw(expanded)
-        rect = (pad, pad, pad + w - 1, pad + h - 1)
-        draw.rectangle(rect, outline=(60, 235, 120), width=2)
-
-        buf = BytesIO()
-        expanded.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
-        return Response(content=png_bytes, media_type="image/png")
+        # Now create PDF with reportlab
+        expanded_w, expanded_h = expanded.size
+        
+        # Convert pixels to points (assuming 72 DPI)
+        width_points = expanded_w * 72 / 72  # 1:1 conversion for now
+        height_points = expanded_h * 72 / 72
+        
+        # Create PDF buffer
+        buffer = BytesIO()
+        c = canvas.Canvas(buffer, pagesize=(width_points, height_points))
+        
+        # Draw the image on the PDF - pass PIL Image object directly
+        c.drawInlineImage(expanded, 0, 0, width=width_points, height=height_points)
+        
+        # Convert bleed from pixels to points
+        bleed_points = pad * 72 / 72
+        
+        # Create spot color for cut contour
+        spot = CMYKColor(0, 1, 0, 0, spotName="CutContour")
+        c.setStrokeColor(spot)
+        c.setLineWidth(0.25)
+        
+        # Draw cut line at trim size (inside bleed area)
+        c.rect(bleed_points, bleed_points,
+               width_points - 2 * bleed_points, height_points - 2 * bleed_points,
+               stroke=1, fill=0)
+        
+        c.save()
+        pdf_bytes = buffer.getvalue()
+        return Response(content=pdf_bytes, media_type="application/pdf")
+        
     except Exception as exc:
         logger.exception("processing failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -322,6 +347,39 @@ async def resize_image_endpoint(
         logger.exception("resize failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
+
+
+@app.post("/pdf_to_image")
+async def pdf_to_image_endpoint(
+    file: UploadFile = File(...),
+):
+    """Convert the first page of a PDF to a PNG image and return it."""
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Unsupported file type; expected application/pdf")
+
+    try:
+        raw = await file.read()
+        # Render first page of PDF to image using PyMuPDF
+        pdf_doc = fitz.open(stream=raw, filetype="pdf")
+        if pdf_doc.page_count == 0:
+            raise HTTPException(status_code=400, detail="Empty PDF")
+        page = pdf_doc.load_page(0)
+        # Use a higher zoom for better quality
+        zoom = 2.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        mode = "RGB" if pix.n < 4 else "RGBA"
+        pil_image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+        if pil_image.mode != "RGB":
+            pil_image = pil_image.convert("RGB")
+        
+        # Convert to PNG
+        buf = BytesIO()
+        pil_image.save(buf, format="PNG")
+        return Response(content=buf.getvalue(), media_type="image/png")
+    except Exception as exc:
+        logger.exception("pdf_to_image failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/image_to_pdf")

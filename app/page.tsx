@@ -65,6 +65,29 @@ export default function Home() {
     });
   }
 
+  async function convertPdfToImageViaBackend(pdfFile: File): Promise<string> {
+    try {
+      const formData = new FormData();
+      formData.append('file', pdfFile);
+      
+      const response = await fetch(`${BACKEND_URL}/pdf_to_image`, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `PDF conversion failed (${response.status})`);
+      }
+      
+      const blob = await response.blob();
+      return URL.createObjectURL(blob);
+    } catch (error) {
+      console.error('Error converting PDF to image via backend:', error);
+      throw error;
+    }
+  }
+
   // End selection even if mouse is released outside the image container
   useEffect(() => {
     const onWinMouseUp = () => {
@@ -253,10 +276,16 @@ export default function Home() {
     } catch {}
   }
 
-  // Cleanup any created PDF object URL
+  // Cleanup any created PDF object URL and image object URLs
   useEffect(() => {
-    return () => revokeUrl(pdfUrl);
-  }, [pdfUrl]);
+    return () => {
+      revokeUrl(pdfUrl);
+      // Also revoke imageSrc if it's an object URL (from PDF conversion)
+      if (imageSrc && imageSrc.startsWith('blob:')) {
+        revokeUrl(imageSrc);
+      }
+    };
+  }, [pdfUrl, imageSrc]);
 
   async function refreshToSendPreview() {
     if (!imageSrc) {
@@ -482,13 +511,23 @@ export default function Home() {
                   setProcessedPdfUrl(null);
                   if (f) {
                     if (f.type === 'application/pdf') {
-                      // PDF flow
+                      // PDF flow - convert to image via backend
                       revokeUrl(pdfUrl);
-                      const url = URL.createObjectURL(f);
-                      setPdfUrl(url);
-                      // reset image-related state
-                      setImageSrc(null);
-                      setNaturalSize(null);
+                      setPdfUrl(null);
+                      // Clean up previous imageSrc if it's an object URL
+                      if (imageSrc && imageSrc.startsWith('blob:')) {
+                        revokeUrl(imageSrc);
+                      }
+                      try {
+                        const imageObjectUrl = await convertPdfToImageViaBackend(f);
+                        setImageSrc(imageObjectUrl);
+                        const img = await createImage(imageObjectUrl);
+                        setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+                      } catch (error) {
+                        console.error('Failed to convert PDF to image:', error);
+                        setImageSrc(null);
+                        setNaturalSize(null);
+                      }
                       setSelection(null);
                       setStartPoint(null);
                       setZoom(1);
@@ -498,6 +537,10 @@ export default function Home() {
                       // Image flow
                       revokeUrl(pdfUrl);
                       setPdfUrl(null);
+                      // Clean up previous imageSrc if it's an object URL
+                      if (imageSrc && imageSrc.startsWith('blob:')) {
+                        revokeUrl(imageSrc);
+                      }
                       const dataUrl = await readFileToDataURL(f);
                       setImageSrc(dataUrl);
                       try {
@@ -513,6 +556,10 @@ export default function Home() {
                       setToSendPreviewUrl(null);
                     }
                   } else {
+                    // Clean up previous imageSrc if it's an object URL
+                    if (imageSrc && imageSrc.startsWith('blob:')) {
+                      revokeUrl(imageSrc);
+                    }
                     setImageSrc(null);
                     setSelection(null);
                     revokeUrl(pdfUrl);
@@ -639,11 +686,7 @@ export default function Home() {
               )}
             </div>
           )}
-          {!imageSrc && pdfUrl && (
-            <div className="relative rounded-lg overflow-hidden glass w-full">
-              <iframe title="pdf-preview" src={pdfUrl} className="w-full h-[75vh] rounded" />
-            </div>
-          )}
+
           
           {/* Reset buttons under image */}
           {imageSrc && (
@@ -1047,40 +1090,42 @@ export default function Home() {
 
         <div className="card p-6">
           <h2 className="text-xl font-semibold mb-2">Rezultatul analizei/procesării</h2>
+          
           {/* Preview of the exact image sent to the API (image uploads) */}
           {toSendPreviewUrl && (
-            <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
-              <NextImage
-                src={toSendPreviewUrl}
-                alt="to-send"
-                fill
-                unoptimized
-                className="object-contain rounded"
-                sizes="(max-width: 1024px) 100vw, 50vw"
-              />
-            </div>
-          )}
-          {/* For PDFs, show the PDF itself on the right as well */}
-          {!toSendPreviewUrl && pdfUrl && (
-            <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
-              <iframe title="pdf-to-send" src={pdfUrl} className="w-full h-[60vh] rounded" />
-            </div>
-          )}
-          {/* Processed image should appear here on the right side */}
-          {processedUrl && (
-            <div className="relative w-full rounded border border-white/10 mt-4" style={{ aspectRatio: "4 / 3" }}>
-              {processedType === 'application/pdf' ? (
-                <iframe title="processed-pdf" src={processedUrl} className="w-full h-[60vh] rounded" />
-              ) : (
+            <div className="mb-6">
+              <h3 className="text-lg font-medium mb-3 text-[var(--accent)]">Imaginea care urmează să fie procesată</h3>
+              <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
                 <NextImage
-                  src={processedUrl}
-                  alt="processed"
+                  src={toSendPreviewUrl}
+                  alt="to-send"
                   fill
                   unoptimized
                   className="object-contain rounded"
                   sizes="(max-width: 1024px) 100vw, 50vw"
                 />
-              )}
+              </div>
+            </div>
+          )}
+
+          {/* Processed result should appear here on the right side */}
+          {processedUrl && (
+            <div className="mb-6">
+              <h3 className="text-lg font-medium mb-3 text-[var(--accent)]">Rezultatul în format PDF</h3>
+              <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
+                {processedType === 'application/pdf' ? (
+                  <iframe title="processed-pdf" src={processedUrl} className="w-full h-[60vh] rounded" />
+                ) : (
+                  <NextImage
+                    src={processedUrl}
+                    alt="processed"
+                    fill
+                    unoptimized
+                    className="object-contain rounded"
+                    sizes="(max-width: 1024px) 100vw, 50vw"
+                  />
+                )}
+              </div>
             </div>
           )}
           {processedUrl && (
