@@ -1,0 +1,146 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<<
+/Producer (Python Cutting PDF Generator)
+/Author (ReportLab Generator)
+/CreationDate (D\07220250908001353\05303\04700\047)
+/Creator (ReportLab \053 PyPDF Enhancement)
+/Keywords (cutting\054 die\055cut\054 spot\055color\054 CUT)
+/ModDate (D\07220250908001353\05303\04700\047)
+/Subject (Cutting Machine Compatible PDF)
+/Title (Cutline Document)
+/Trapped (\057False)
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Count 1
+/Kids [ 4 0 R ]
+>>
+endobj
+3 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+4 0 obj
+<<
+/Contents 5 0 R
+/MediaBox [ 0 0 360 360 ]
+/Resources <<
+/ExtGState <<
+/gRLs0 <<
+/ca 0.13
+>>
+/gRLs1 <<
+/CA 0.13
+>>
+/gRLs2 <<
+/ca 1
+>>
+/GS_Cut <<
+/Type /ExtGState
+/AIS false
+/BM /Normal
+/CA 1
+/OP false
+/OPM 1
+/SA true
+/SMask /None
+/ca 1
+/op false
+>>
+>>
+/Font 6 0 R
+/ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+/ColorSpace <<
+/CS0 [ /Separation /CUT /DeviceCMYK <<
+/FunctionType 2
+/Domain [ 0 1 ]
+/C0 [ 1 1 1 1 ]
+/C1 [ 0 0 0 0 ]
+/N 1
+/Range [ 0 1 0 1 0 1 0 1 ]
+>> ]
+>>
+/Properties <<
+/MC_CUT <<
+/Title (CUT Layer)
+/Visible true
+/Preview true
+/Printed true
+/Dimmed false
+/Editable true
+/Color [ 65535 8738 8738 ]
+>>
+>>
+>>
+/Rotate 0
+/Trans <<
+>>
+/Type /Page
+/CropBox [ 0 0 360 360 ]
+/TrimBox [ 0 0 360 360 ]
+/BleedBox [ 0 0 360 360 ]
+/ArtBox [ 36 36 324 324 ]
+/LastModified (D\07220250908001353\05300\04700\047)
+/PieceInfo <<
+/Illustrator <<
+/LastModified (D\07220250908001353\05300\04700\047)
+/Private <<
+/ContainerVersion 9
+/CreatorVersion 29
+/RoundtripVersion 29
+/RoundtripStreamType 2
+/NumBlock 1
+>>
+>>
+>>
+/Parent 2 0 R
+>>
+endobj
+5 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ]
+/Length 147
+>>
+stream
+GarnO0a`Fb&DR)>bRSr#M`M72ihZO(BI=hS_=)`Z#WbMtEJ2L]$kdNLb7:lp7F,?N]7E[o?q5<>&b;fZoM--=)?[g0QTP^Kk$+,VK'-%hdLd_H.abHPZEO-Q6/rY4;^7h_Bk63Ur`MNmEePrp~>
+endstream
+endobj
+6 0 obj
+<<
+/F1 7 0 R
+>>
+endobj
+7 0 obj
+<<
+/BaseFont /Helvetica
+/Encoding /WinAnsiEncoding
+/Name /F1
+/Subtype /Type1
+/Type /Font
+>>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000400 00000 n 
+0000000459 00000 n 
+0000000508 00000 n 
+0000001551 00000 n 
+0000001789 00000 n 
+0000001820 00000 n 
+trailer
+<<
+/Size 8
+/Root 3 0 R
+/Info 1 0 R
+>>
+startxref
+1927
+%%EOF

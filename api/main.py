@@ -2,7 +2,6 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-from PIL import Image, ImageDraw
 from io import BytesIO
 import base64
 import logging
@@ -12,8 +11,8 @@ from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
 import fitz  # PyMuPDF
 from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm, inch
 from reportlab.lib.colors import CMYKColor
+from PIL import Image
 
 class AnalysisResponse(BaseModel):
     result: str
@@ -29,12 +28,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+prefix = "/api"
 
-@app.get("/")
+@app.get(f"{prefix}/")
 def read_root():
     return {"message": "Hello from FastAPI!"}
 
-@app.get("/health")
+@app.get(f"{prefix}/health")
 def health_check():
     return {"status": "healthy"}
 
@@ -137,7 +137,7 @@ Provide clear, actionable recommendations for optimal print results.
     return response.choices[0].message.content
 
 
-@app.post("/analyze", response_model=AnalysisResponse)
+@app.post(f"{prefix}/analyze", response_model=AnalysisResponse)
 async def analyze_endpoint(
     file: UploadFile = File(...),
     use_case: str = Form(...),
@@ -159,7 +159,7 @@ async def analyze_endpoint(
     return AnalysisResponse(result=result_text)
 
 
-@app.post("/analyze_pdf", response_model=AnalysisResponse)
+@app.post(f"{prefix}/analyze_pdf", response_model=AnalysisResponse)
 async def analyze_pdf_endpoint(
     file: UploadFile = File(...),
     use_case: str = Form(""),
@@ -193,13 +193,13 @@ async def analyze_pdf_endpoint(
     return AnalysisResponse(result=result_text)
 
 
-@app.post("/remove_background")
+@app.post(f"{prefix}/remove_background")
 async def remove_background_endpoint(file: UploadFile = File(None)):
     # Placeholder endpoint – to be implemented
     return {"message": "Will be implemented soon"}
 
 
-@app.post("/process")
+@app.post(f"{prefix}/process")
 async def process_image_endpoint(
     file: UploadFile = File(...),
     bleed_px: int = Form(30),
@@ -301,7 +301,7 @@ async def process_image_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/resize")
+@app.post(f"{prefix}/resize")
 async def resize_image_endpoint(
     file: UploadFile = File(...),
     width: float = Form(...),
@@ -349,7 +349,7 @@ async def resize_image_endpoint(
 
 
 
-@app.post("/pdf_to_image")
+@app.post(f"{prefix}/pdf_to_image")
 async def pdf_to_image_endpoint(
     file: UploadFile = File(...),
 ):
@@ -382,7 +382,7 @@ async def pdf_to_image_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/image_to_pdf")
+@app.post(f"{prefix}/image_to_pdf")
 async def image_to_pdf_endpoint(
     file: UploadFile = File(...),
 ):
