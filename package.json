@@ -10,9 +10,9 @@
     "api": "cd api && uvicorn main:app --reload --host 0.0.0.0 --port 8000"
   },
   "dependencies": {
-    "next": "15.4.6",
-    "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "next": "^15.4.6",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

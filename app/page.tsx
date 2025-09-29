@@ -24,7 +24,6 @@ export default function Home() {
     width: number;
     height: number;
   } | null>(null);
-  const [useCase, setUseCase] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,11 +39,52 @@ export default function Home() {
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
   
+  // Global units and format selection
+  const [globalUnit, setGlobalUnit] = useState<string>("mm");
+  const [selectedFormat, setSelectedFormat] = useState<string>("A4");
+  const [customWidth, setCustomWidth] = useState<string>("210");
+  const [customHeight, setCustomHeight] = useState<string>("297");
+  
   // Cropping mode state
   const [cropMode, setCropMode] = useState<"free" | "fixed">("free");
   const [fixedWidth, setFixedWidth] = useState<string>("100");
   const [fixedHeight, setFixedHeight] = useState<string>("100");
   const [dragging, setDragging] = useState(false);
+
+  // Common formats with dimensions in mm
+  const commonFormats = {
+    "A4": { width: 210, height: 297 },
+    "A3": { width: 297, height: 420 },
+    "A5": { width: 148, height: 210 },
+    "Letter": { width: 215.9, height: 279.4 },
+    "Legal": { width: 215.9, height: 355.6 },
+    "Tabloid": { width: 279.4, height: 431.8 },
+    "Business Card": { width: 85, height: 55 },
+    "Postcard": { width: 148, height: 105 },
+    "Poster A2": { width: 420, height: 594 },
+    "Poster A1": { width: 594, height: 841 },
+    "Custom": { width: 0, height: 0 }
+  };
+
+  // Convert dimensions based on global unit
+  const convertDimensions = (mmValue: number) => {
+    return globalUnit === "mm" ? mmValue : Number((mmValue / 25.4).toFixed(2));
+  };
+
+  // Get current format dimensions
+  const getCurrentFormatDimensions = () => {
+    if (selectedFormat === "Custom") {
+      return {
+        width: parseFloat(customWidth) || 0,
+        height: parseFloat(customHeight) || 0
+      };
+    }
+    const format = commonFormats[selectedFormat as keyof typeof commonFormats];
+    return {
+      width: convertDimensions(format.width),
+      height: convertDimensions(format.height)
+    };
+  };
 
   function readFileToDataURL(f: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -341,8 +381,8 @@ export default function Home() {
     e.preventDefault();
     setError(null);
     setResult(null);
-    if ((!file && !imageSrc) || !useCase) {
-      setError("Please select an image and enter a use case.");
+    if ((!file && !imageSrc)) {
+      setError("Please select an image.");
       return;
     }
     const form = new FormData();
@@ -389,7 +429,14 @@ export default function Home() {
     } catch {}
 
     form.append("file", fileToSend);
-    form.append("use_case", useCase);
+    
+    // Use the selected format as use case
+    const formatDims = getCurrentFormatDimensions();
+    const formatUseCase = selectedFormat === "Custom" 
+      ? `Custom format: ${formatDims.width}×${formatDims.height} ${globalUnit}`
+      : `${selectedFormat} format (${formatDims.width}×${formatDims.height} ${globalUnit})`;
+    
+    form.append("use_case", formatUseCase);
     setLoading(true);
     try {
       const isPdf = file && file.type === 'application/pdf';
@@ -487,8 +534,20 @@ export default function Home() {
 
   return (
     <div className="mx-auto max-w-[1800px] px-8 py-8">
-      <header className="mb-8">
+      <header className="mb-8 flex justify-between items-start">
         <h1 className="text-3xl font-bold heading">Daisler Print Processor</h1>
+        {/* Global Units Picker */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">Unități:</label>
+          <select 
+            value={globalUnit} 
+            onChange={(e) => setGlobalUnit(e.target.value)}
+            className="rounded-lg p-2 bg-white border border-gray-300 text-gray-800 text-sm min-w-16 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          >
+            <option value="mm">mm</option>
+            <option value="inch">inch</option>
+          </select>
+        </div>
       </header>
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
         <div className="card p-6">
@@ -852,16 +911,94 @@ export default function Home() {
             </div>
           )}
           
-          <div>
-            <label className="block text-sm font-medium mb-2">Descrieți scopul utilizării</label>
-            <input
-              type="text"
-              placeholder="ex.: carte de vizită, poster, tricou, autocolant"
-              value={useCase}
-              onChange={(e) => setUseCase(e.target.value)}
-              className="w-full rounded-lg p-3 bg-transparent border border-white/10 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-            />
+          {/* Format Selection */}
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">Format de printare</label>
+              <select
+                value={selectedFormat}
+                onChange={(e) => setSelectedFormat(e.target.value)}
+                className="w-full rounded-lg p-3 bg-white border border-gray-300 text-gray-800 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-[var(--accent)]"
+              >
+                {Object.keys(commonFormats).map((format) => (
+                  <option key={format} value={format}>
+                    {format}
+                    {format !== "Custom" && (
+                      ` (${convertDimensions(commonFormats[format as keyof typeof commonFormats].width)} × ${convertDimensions(commonFormats[format as keyof typeof commonFormats].height)} ${globalUnit})`
+                    )}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Custom dimensions inputs */}
+            {selectedFormat === "Custom" && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Lățime ({globalUnit})</label>
+                  <input
+                    type="number"
+                    value={customWidth}
+                    onChange={(e) => setCustomWidth(e.target.value)}
+                    placeholder={`Lățime în ${globalUnit}`}
+                    className="w-full rounded-lg p-2 bg-white border border-gray-300 text-gray-800 placeholder-gray-500 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-[var(--accent)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Înălțime ({globalUnit})</label>
+                  <input
+                    type="number"
+                    value={customHeight}
+                    onChange={(e) => setCustomHeight(e.target.value)}
+                    placeholder={`Înălțime în ${globalUnit}`}
+                    className="w-full rounded-lg p-2 bg-white border border-gray-300 text-gray-800 placeholder-gray-500 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-[var(--accent)]"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Format Preview Rectangle */}
+            <div className="flex items-center justify-center p-4 bg-white/5 rounded-lg">
+              <div className="flex flex-col items-center gap-2">
+                <span className="text-xs text-gray-400">Previzualizare format</span>
+                {(() => {
+                  const dims = getCurrentFormatDimensions();
+                  if (dims.width <= 0 || dims.height <= 0) return null;
+                  
+                  // Scale the preview rectangle to fit nicely
+                  const maxSize = 120;
+                  const aspectRatio = dims.width / dims.height;
+                  let previewWidth, previewHeight;
+                  
+                  if (aspectRatio > 1) {
+                    previewWidth = Math.min(maxSize, dims.width);
+                    previewHeight = previewWidth / aspectRatio;
+                  } else {
+                    previewHeight = Math.min(maxSize, dims.height);
+                    previewWidth = previewHeight * aspectRatio;
+                  }
+                  
+                  return (
+                    <div className="flex flex-col items-center gap-1">
+                      <div 
+                        className="border-2 border-[var(--accent)] bg-[var(--accent)]/10 rounded"
+                        style={{
+                          width: `${previewWidth}px`,
+                          height: `${previewHeight}px`,
+                          minWidth: '20px',
+                          minHeight: '20px'
+                        }}
+                      />
+                      <span className="text-xs text-gray-300">
+                        {dims.width.toFixed(1)} × {dims.height.toFixed(1)} {globalUnit}
+                      </span>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
           </div>
+          
           <div className="flex items-center gap-3">
             <button
               type="submit"
@@ -939,8 +1076,8 @@ export default function Home() {
               </div>
               <div>
                 <label className="block text-xs mb-1">Unitate</label>
-                <select value={resizeUnit} onChange={(e) => setResizeUnit(e.target.value)}
-                        className="w-full rounded-lg p-2 bg-transparent border border-white/10">
+                <select value={globalUnit} onChange={(e) => setGlobalUnit(e.target.value)}
+                        className="w-full rounded-lg p-2 bg-white border border-gray-300 text-gray-800 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]">
                   <option value="mm">mm</option>
                   <option value="inch">inch</option>
                 </select>
@@ -975,7 +1112,7 @@ export default function Home() {
                     form.append("width", String(w));
                     form.append("height", String(h));
                     form.append("dpi", String(d));
-                    form.append("unit", resizeUnit);
+                    form.append("unit", globalUnit);
                     const resz = await fetch(`${BACKEND_URL}/resize`, { method: "POST", body: form });
                     if (!resz.ok) {
                       const t = await resz.text();
@@ -1004,7 +1141,7 @@ export default function Home() {
                 const w = parseFloat(resizeWidth);
                 const h = parseFloat(resizeHeight);
                 const d = parseInt(resizeDpi, 10);
-                const unit = (resizeUnit || "mm").trim().toLowerCase();
+                const unit = (globalUnit || "mm").trim().toLowerCase();
                 
                 if (!(w > 0 && h > 0 && d > 0)) return null;
                 
