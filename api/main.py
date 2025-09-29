@@ -9,7 +9,7 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
-import fitz  # PyMuPDF
+import fitz
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import CMYKColor
 from PIL import Image
@@ -30,9 +30,6 @@ app.add_middleware(
 
 prefix = "/api"
 
-@app.get(f"{prefix}/")
-def read_root():
-    return {"message": "Hello from FastAPI!"}
 
 @app.get(f"{prefix}/health")
 def health_check():
@@ -399,3 +396,31 @@ async def image_to_pdf_endpoint(
     except Exception as exc:
         logger.exception("image_to_pdf failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+    
+    
+
+@app.post(f"{prefix}/read_pdf_with_fitz")
+async def read_pdf_with_fitz_endpoint(
+    file: UploadFile = File(...),
+):
+    """Read a PDF file using PyMuPDF and return it."""
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Unsupported file type; expected application/pdf")
+    
+    raw = await file.read()
+    try:
+        read_pdf_with_fitz(raw)
+        return Response("Successfully read PDF with PyMuPDF")
+    except Exception as exc:
+        logger.exception("read_pdf_with_fitz failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+    
+
+def read_pdf_with_fitz(bytes_data):
+    try:
+        pdf = fitz.open(stream=bytes_data, filetype="pdf")
+        
+        return pdf
+    except Exception as exc:
+        logger.exception("read_pdf_with_fitz failed: %s", exc)
+        raise exc

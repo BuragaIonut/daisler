@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import NextImage from "next/image";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000/api";
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
