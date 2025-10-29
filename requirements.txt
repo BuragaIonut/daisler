@@ -6,3 +6,6 @@ Pillow
 openai
 PyMuPDF
 reportlab
+langchain
+langchain-openai
+gradio-client

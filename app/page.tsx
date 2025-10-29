@@ -38,6 +38,30 @@ export default function Home() {
   const [resizeUnit, setResizeUnit] = useState<string>("mm");
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
+  const [bleedSize, setBleedSize] = useState<string>("3");
+  const [processingForPrint, setProcessingForPrint] = useState(false);
+  
+  // Debug info state
+  const [debugInfo, setDebugInfo] = useState<{
+    currentImageDims?: { width: number; height: number };
+    croppedImageDims?: { width: number; height: number };
+    desiredDims?: { width: number; height: number; unit: string };
+    desiredDimsMm?: { width: number; height: number };
+    desiredPixels?: { width: number; height: number };
+    currentRatio?: number;
+    desiredRatio?: number;
+    scalingFactor?: number;
+    strategy?: string;
+    effectiveDpi?: number;
+    targetDpi?: number;
+    bleedPx?: number;
+    intermediaryImages?: Array<{
+      name: string;
+      url: string;
+      dimensions?: { width: number; height: number };
+    }>;
+  }>({});
+  const [showDebug, setShowDebug] = useState(false);
   
   // Global units and format selection
   const [globalUnit, setGlobalUnit] = useState<string>("mm");
@@ -465,19 +489,121 @@ export default function Home() {
     setProcessedType(null);
     revokeUrl(processedPdfUrl);
     setProcessedPdfUrl(null);
+    setDebugInfo({}); // Clear previous debug info
+    
     if (!imageSrc && !file) {
       setError("Please select an image first.");
       return;
     }
 
+    // Get target dimensions from format selection
+    const formatDims = getCurrentFormatDimensions();
+    if (formatDims.width <= 0 || formatDims.height <= 0) {
+      setError("Please select valid dimensions.");
+      return;
+    }
+
+    // Get DPI
+    const targetDpi = parseInt(resizeDpi, 10);
+    if (!targetDpi || targetDpi <= 0) {
+      setError("Please enter a valid DPI.");
+      return;
+    }
+
+    // Calculate debug info
+    const debug: typeof debugInfo = {
+      desiredDims: { 
+        width: formatDims.width, 
+        height: formatDims.height, 
+        unit: globalUnit 
+      },
+      targetDpi: targetDpi,
+      intermediaryImages: []
+    };
+
+    // Convert to mm for calculations
+    const targetWidthMm = globalUnit === "mm" 
+      ? formatDims.width 
+      : formatDims.width * 25.4;
+    const targetHeightMm = globalUnit === "mm" 
+      ? formatDims.height 
+      : formatDims.height * 25.4;
+    debug.desiredDimsMm = { width: targetWidthMm, height: targetHeightMm };
+
+    // Calculate desired pixels
+    const desiredWidthPx = Math.round((targetWidthMm / 25.4) * targetDpi);
+    const desiredHeightPx = Math.round((targetHeightMm / 25.4) * targetDpi);
+    debug.desiredPixels = { width: desiredWidthPx, height: desiredHeightPx };
+    debug.desiredRatio = desiredWidthPx / desiredHeightPx;
+
+    // Get current image dimensions
+    if (naturalSize) {
+      debug.currentImageDims = { 
+        width: naturalSize.width, 
+        height: naturalSize.height 
+      };
+      debug.currentRatio = naturalSize.width / naturalSize.height;
+    }
+
+    // Calculate bleed in pixels
+    const bleedValue = parseFloat(bleedSize) || 0;
+    if (bleedValue > 0) {
+      debug.bleedPx = Math.round((bleedValue / 25.4) * targetDpi);
+    }
+
     // Build the exact same file that would be sent (respecting crop)
     let fileToSend: File | null = file;
+    
+    // CRITICAL: If the original file is a PDF, we must convert it to image first
+    if (fileToSend && fileToSend.type === 'application/pdf') {
+      try {
+        const pdfForm = new FormData();
+        pdfForm.append('file', fileToSend);
+        const pdfRes = await fetch(`${BACKEND_URL}/pdf_to_image`, {
+          method: 'POST',
+          body: pdfForm
+        });
+        if (!pdfRes.ok) {
+          throw new Error(`PDF conversion failed (${pdfRes.status})`);
+        }
+        const imageBlob = await pdfRes.blob();
+        fileToSend = new File([imageBlob], "converted.png", { 
+          type: "image/png" 
+        });
+        
+        // Update imageSrc for cropping if needed
+        if (!imageSrc) {
+          const convertedUrl = URL.createObjectURL(imageBlob);
+          setImageSrc(convertedUrl);
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error 
+          ? err.message 
+          : "PDF conversion failed";
+        setError(message);
+        return;
+      }
+    }
+    
     try {
       if (imageSrc && selection) {
         const cropPixels = computeCropPixelsFromSelection(selection);
         if (cropPixels) {
           const blob = await getCroppedBlob(imageSrc, cropPixels);
           fileToSend = new File([blob], "crop.png", { type: "image/png" });
+          debug.croppedImageDims = { 
+            width: cropPixels.width, 
+            height: cropPixels.height 
+          };
+          debug.currentRatio = cropPixels.width / cropPixels.height;
+          
+          // Add cropped image to intermediary images
+          const croppedUrl = URL.createObjectURL(blob);
+          debug.intermediaryImages?.push({
+            name: "Cropped Image",
+            url: croppedUrl,
+            dimensions: { width: cropPixels.width, height: cropPixels.height }
+          });
         }
       }
     } catch (err: unknown) {
@@ -489,19 +615,92 @@ export default function Home() {
     if (!fileToSend && imageSrc) {
       const res = await fetch(imageSrc);
       const blob = await res.blob();
-      fileToSend = new File([blob], "image.png", { type: blob.type || "image/png" });
+      fileToSend = new File([blob], "image.png", { 
+        type: blob.type || "image/png" 
+      });
     }
     if (!fileToSend) {
       setError("No file to process");
       return;
     }
 
+    // Calculate scaling factor
+    const currentWidth = debug.croppedImageDims?.width || 
+      debug.currentImageDims?.width || 0;
+    const currentHeight = debug.croppedImageDims?.height || 
+      debug.currentImageDims?.height || 0;
+    if (currentWidth > 0 && currentHeight > 0) {
+      const scaleX = desiredWidthPx / currentWidth;
+      const scaleY = desiredHeightPx / currentHeight;
+      debug.scalingFactor = Math.max(scaleX, scaleY);
+      
+      // Calculate effective DPI
+      const printWidthInch = targetWidthMm / 25.4;
+      const printHeightInch = targetHeightMm / 25.4;
+      const effectiveDpiX = currentWidth / printWidthInch;
+      const effectiveDpiY = currentHeight / printHeightInch;
+      debug.effectiveDpi = Math.round(Math.min(effectiveDpiX, effectiveDpiY));
+    }
+
+    // Determine strategy (basic logic - backend will do the actual calculation)
+    if (debug.currentRatio && debug.desiredRatio) {
+      const cr = debug.currentRatio;
+      const dr = debug.desiredRatio;
+      
+      if (Math.abs(cr - dr) < 0.01) {
+        debug.strategy = "no_extension_needed";
+      } else if (dr > 1) {
+        // Landscape desired
+        if (cr > 1) {
+          debug.strategy = cr < dr 
+            ? "landscape_extend_width" 
+            : "landscape_extend_height";
+        } else if (cr < 1) {
+          debug.strategy = "portrait_to_square_to_landscape";
+        } else {
+          debug.strategy = "square_to_landscape";
+        }
+      } else if (dr < 1) {
+        // Portrait desired
+        if (cr < 1) {
+          debug.strategy = cr > dr 
+            ? "portrait_extend_height" 
+            : "portrait_extend_width";
+        } else if (cr > 1) {
+          debug.strategy = "landscape_to_square_to_portrait";
+        } else {
+          debug.strategy = "square_to_portrait";
+        }
+      } else {
+        // Square desired
+        if (cr > 1) {
+          debug.strategy = "landscape_to_square";
+        } else if (cr < 1) {
+          debug.strategy = "portrait_to_square";
+        } else {
+          debug.strategy = "no_extension_needed";
+        }
+      }
+    }
+
+    setDebugInfo(debug);
+
+    setProcessingForPrint(true);
     const form = new FormData();
     form.append("file", fileToSend);
-    form.append("bleed_px", String(30));
+    form.append("target_width", String(formatDims.width));
+    form.append("target_height", String(formatDims.height));
+    form.append("unit", globalUnit);
+    form.append("dpi", String(targetDpi));
+    const bleedValueToSend = parseFloat(bleedSize) || 0;
+    form.append("add_bleed", String(bleedValueToSend > 0));
+    form.append("bleed_mm", bleedSize);
 
     try {
-      const res = await fetch(`${BACKEND_URL}/process`, { method: "POST", body: form });
+      const res = await fetch(`${BACKEND_URL}/process_for_print`, { 
+        method: "POST", 
+        body: form 
+      });
       if (!res.ok) {
         const t = await res.text();
         throw new Error(t || `Process failed (${res.status})`);
@@ -509,10 +708,12 @@ export default function Home() {
       const blob = await res.blob();
       if (processedUrl) URL.revokeObjectURL(processedUrl);
       setProcessedUrl(URL.createObjectURL(blob));
-      setProcessedType(blob.type || null);
+      setProcessedType("application/pdf");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Processing error";
       setError(message);
+    } finally {
+      setProcessingForPrint(false);
     }
   };
 
@@ -536,17 +737,41 @@ export default function Home() {
     <div className="mx-auto max-w-[1800px] px-8 py-8">
       <header className="mb-8 flex justify-between items-start">
         <h1 className="text-3xl font-bold heading">Daisler Print Processor</h1>
-        {/* Global Units Picker */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm font-medium">Unități:</label>
-          <select 
-            value={globalUnit} 
-            onChange={(e) => setGlobalUnit(e.target.value)}
-            className="rounded-lg p-2 bg-white border border-gray-300 text-gray-800 text-sm min-w-16 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
-          >
-            <option value="mm">mm</option>
-            <option value="inch">inch</option>
-          </select>
+        {/* Global Units, DPI, and Bleed Picker */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium">Unități:</label>
+            <select 
+              value={globalUnit} 
+              onChange={(e) => setGlobalUnit(e.target.value)}
+              className="rounded-lg p-2 bg-white border border-gray-300 text-gray-800 text-sm min-w-16 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            >
+              <option value="mm">mm</option>
+              <option value="inch">inch</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium">DPI:</label>
+            <input 
+              value={resizeDpi} 
+              onChange={(e) => setResizeDpi(e.target.value)} 
+              placeholder="300"
+              className="rounded-lg p-2 bg-white border border-gray-300 text-gray-800 text-sm w-20 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium">Bleed:</label>
+            <select 
+              value={bleedSize} 
+              onChange={(e) => setBleedSize(e.target.value)}
+              className="rounded-lg p-2 bg-white border border-gray-300 text-gray-800 text-sm min-w-24 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            >
+              <option value="0">No bleed</option>
+              <option value="3">3mm</option>
+              <option value="5">5mm</option>
+              <option value="10">10mm</option>
+            </select>
+          </div>
         </div>
       </header>
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
@@ -1001,145 +1226,34 @@ export default function Home() {
           
           <div className="flex items-center gap-3">
             <button
-              type="submit"
-              disabled={loading}
-              className="btn-primary disabled:opacity-60 min-w-36"
-            >
-              {loading ? "Se analizează..." : "Analizează"}
-            </button>
-            <button
               type="button"
               onClick={onProcess}
-              className="btn-secondary disabled:opacity-60 min-w-36"
-              disabled={false}
+              className="btn-primary disabled:opacity-60 min-w-36 flex items-center justify-center gap-2"
+              disabled={processingForPrint}
             >
-              Procesează
+              {processingForPrint ? (
+                <>
+                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Se procesează...
+                </>
+              ) : (
+                'Procesează pentru print'
+              )}
             </button>
-            <button
-              type="button"
-              className="btn-secondary disabled:opacity-60 min-w-36"
-              disabled={!imageSrc}
-              onClick={async () => {
-                if (!imageSrc) return;
-                setError(null);
-                try {
-                  let toSend: File | null = null;
-                  if (isValidSelection(selection)) {
-                    const cropPixels = computeCropPixelsFromSelection(selection);
-                    if (!cropPixels) throw new Error("Selecție invalidă pentru decupare");
-                    const blob = await getCroppedBlob(imageSrc, cropPixels);
-                    toSend = new File([blob], "crop.png", { type: "image/png" });
-                  } else {
-                    const res = await fetch(imageSrc);
-                    const blob = await res.blob();
-                    toSend = new File([blob], "image.png", { type: blob.type || "image/png" });
-                  }
-                  const form = new FormData();
-                  form.append("file", toSend);
-                  const res = await fetch(`${BACKEND_URL}/remove_background`, { method: "POST", body: form });
-                  if (!res.ok) {
-                    const t = await res.text();
-                    throw new Error(t || `Remove background failed (${res.status})`);
-                  }
-                  const data = await res.json();
-                  setResult((prev) => `${prev ? prev + "\n\n" : ""}Elimină fundalul: ${data.message}`);
-                } catch (err: unknown) {
-                  const message = err instanceof Error ? err.message : "Background remover error";
-                  setError(message);
-                }
-              }}
-            >
-              Elimină fundalul
-            </button>
-
-
-
-            {/* Resize controls */}
           </div>
 
           <div className="mt-4 space-y-4">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
-              <div>
-                <label className="block text-xs mb-1">X</label>
-                <input value={resizeWidth} onChange={(e) => setResizeWidth(e.target.value)} placeholder="lățime"
-                       className="w-full rounded-lg p-2 bg-transparent border border-white/10" />
-              </div>
-              <div>
-                <label className="block text-xs mb-1">Y</label>
-                <input value={resizeHeight} onChange={(e) => setResizeHeight(e.target.value)} placeholder="înălțime"
-                       className="w-full rounded-lg p-2 bg-transparent border border-white/10" />
-              </div>
-              <div>
-                <label className="block text-xs mb-1">DPI</label>
-                <input value={resizeDpi} onChange={(e) => setResizeDpi(e.target.value)} placeholder="dpi" 
-                       className="w-full rounded-lg p-2 bg-transparent border border-white/10" />
-              </div>
-              <div>
-                <label className="block text-xs mb-1">Unitate</label>
-                <select value={globalUnit} onChange={(e) => setGlobalUnit(e.target.value)}
-                        className="w-full rounded-lg p-2 bg-white border border-gray-300 text-gray-800 hover:border-gray-400 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]">
-                  <option value="mm">mm</option>
-                  <option value="inch">inch</option>
-                </select>
-              </div>
-              <div className="col-span-2 md:col-span-1">
-                <button type="button" className="btn-secondary w-full whitespace-nowrap text-sm" disabled={!imageSrc}
-                onClick={async () => {
-                  if (!imageSrc) return;
-                  setError(null);
-                  setProcessedUrl(null);
-                  try {
-                    // input parsing
-                    const w = parseFloat(resizeWidth);
-                    const h = parseFloat(resizeHeight);
-                    const d = parseInt(resizeDpi, 10);
-                    if (!(w > 0 && h > 0 && d > 0)) {
-                      throw new Error("Valori invalid dimensionare");
-                    }
-                    let toSend: File | null = null;
-                    if (isValidSelection(selection)) {
-                      const cropPixels = computeCropPixelsFromSelection(selection);
-                      if (!cropPixels) throw new Error("Selecție invalidă pentru redimensionare");
-                      const blob = await getCroppedBlob(imageSrc, cropPixels);
-                      toSend = new File([blob], "crop.png", { type: "image/png" });
-                    } else {
-                      const res = await fetch(imageSrc);
-                      const blob = await res.blob();
-                      toSend = new File([blob], "image.png", { type: blob.type || "image/png" });
-                    }
-                    const form = new FormData();
-                    form.append("file", toSend);
-                    form.append("width", String(w));
-                    form.append("height", String(h));
-                    form.append("dpi", String(d));
-                    form.append("unit", globalUnit);
-                    const resz = await fetch(`${BACKEND_URL}/resize`, { method: "POST", body: form });
-                    if (!resz.ok) {
-                      const t = await resz.text();
-                      throw new Error(t || `Resize failed (${resz.status})`);
-                    }
-                    const outBlob = await resz.blob();
-                    // Clear any prior generated PDF for old results
-                    revokeUrl(processedPdfUrl);
-                    setProcessedPdfUrl(null);
-                    setProcessedUrl(URL.createObjectURL(outBlob));
-                    setProcessedType(outBlob.type || null);
-                  } catch (err: unknown) {
-                    const message = err instanceof Error ? err.message : "Resize error";
-                    setError(message);
-                  }
-                }}
-                >
-                  Redimensionează
-                </button>
-              </div>
-            </div>
             
             {/* DPI Quality Warning with Large Emoji */}
-            {imageSrc && naturalSize && resizeWidth && resizeHeight && resizeDpi && (
+            {imageSrc && naturalSize && resizeDpi && (
               (() => {
-                const w = parseFloat(resizeWidth);
-                const h = parseFloat(resizeHeight);
+                // Get dimensions from format selection
+                const formatDims = getCurrentFormatDimensions();
+                const w = formatDims.width;
+                const h = formatDims.height;
                 const d = parseInt(resizeDpi, 10);
                 const unit = (globalUnit || "mm").trim().toLowerCase();
                 
@@ -1317,6 +1431,219 @@ export default function Home() {
           {result && (
             <div className="mt-6">
               <pre className="mt-1 whitespace-pre-wrap text-sm leading-6">{result}</pre>
+            </div>
+          )}
+          
+          {/* Debug Information Dropdown */}
+          {Object.keys(debugInfo).length > 0 && (
+            <div className="mt-6 border border-white/10 rounded-lg">
+              <button
+                type="button"
+                onClick={() => setShowDebug(!showDebug)}
+                className="w-full flex items-center justify-between p-4 text-left hover:bg-white/5 transition-colors rounded-lg"
+              >
+                <span className="font-semibold text-lg">
+                  🐛 Debug Information
+                </span>
+                <svg
+                  className={`w-5 h-5 transition-transform ${
+                    showDebug ? "rotate-180" : ""
+                  }`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 9l-7 7-7-7"
+                  />
+                </svg>
+              </button>
+              
+              {showDebug && (
+                <div className="p-4 space-y-6 border-t border-white/10">
+                  {/* Dimensions Section */}
+                  <div className="space-y-3">
+                    <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                      📐 Dimensions
+                    </h4>
+                    
+                    {debugInfo.currentImageDims && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Original Image:</span>{" "}
+                          {debugInfo.currentImageDims.width} × {
+                            debugInfo.currentImageDims.height
+                          } px
+                        </p>
+                      </div>
+                    )}
+                    
+                    {debugInfo.croppedImageDims && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Cropped Image:</span>{" "}
+                          {debugInfo.croppedImageDims.width} × {
+                            debugInfo.croppedImageDims.height
+                          } px
+                        </p>
+                      </div>
+                    )}
+                    
+                    {debugInfo.desiredDims && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Target Dimensions:</span>{" "}
+                          {debugInfo.desiredDims.width.toFixed(2)} × {
+                            debugInfo.desiredDims.height.toFixed(2)
+                          } {debugInfo.desiredDims.unit}
+                        </p>
+                      </div>
+                    )}
+                    
+                    {debugInfo.desiredPixels && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Target Pixels:</span>{" "}
+                          {debugInfo.desiredPixels.width} × {
+                            debugInfo.desiredPixels.height
+                          } px
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Ratios Section */}
+                  <div className="space-y-3">
+                    <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                      📊 Aspect Ratios
+                    </h4>
+                    
+                    {debugInfo.currentRatio && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Current Ratio:</span>{" "}
+                          {debugInfo.currentRatio.toFixed(4)} {
+                            debugInfo.currentRatio > 1 
+                              ? "(Landscape)" 
+                              : debugInfo.currentRatio < 1 
+                                ? "(Portrait)" 
+                                : "(Square)"
+                          }
+                        </p>
+                      </div>
+                    )}
+                    
+                    {debugInfo.desiredRatio && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Desired Ratio:</span>{" "}
+                          {debugInfo.desiredRatio.toFixed(4)} {
+                            debugInfo.desiredRatio > 1 
+                              ? "(Landscape)" 
+                              : debugInfo.desiredRatio < 1 
+                                ? "(Portrait)" 
+                                : "(Square)"
+                          }
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Processing Strategy */}
+                  {debugInfo.strategy && (
+                    <div className="space-y-3">
+                      <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                        🎯 Extension Strategy
+                      </h4>
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300 font-mono bg-white/5 p-2 rounded border border-white/10">
+                          {debugInfo.strategy}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Scaling & DPI */}
+                  <div className="space-y-3">
+                    <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                      🔬 Scaling & Quality
+                    </h4>
+                    
+                    {debugInfo.scalingFactor && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Scaling Factor:</span>{" "}
+                          {debugInfo.scalingFactor.toFixed(4)}x
+                        </p>
+                      </div>
+                    )}
+                    
+                    {debugInfo.effectiveDpi && debugInfo.targetDpi && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Effective DPI:</span>{" "}
+                          {debugInfo.effectiveDpi} / {debugInfo.targetDpi} {
+                            " "}
+                          ({Math.round(
+                            (debugInfo.effectiveDpi / debugInfo.targetDpi) * 100
+                          )}%)
+                        </p>
+                      </div>
+                    )}
+                    
+                    {debugInfo.bleedPx && (
+                      <div className="pl-4 space-y-1 text-sm">
+                        <p className="text-gray-300">
+                          <span className="font-medium">Bleed:</span>{" "}
+                          {debugInfo.bleedPx} px ({bleedSize} mm)
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Intermediary Images */}
+                  {debugInfo.intermediaryImages && 
+                   debugInfo.intermediaryImages.length > 0 && (
+                    <div className="space-y-3">
+                      <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                        🖼️ Intermediary Images
+                      </h4>
+                      <div className="space-y-4">
+                        {debugInfo.intermediaryImages.map((img, idx) => (
+                          <div key={idx} className="pl-4 space-y-2">
+                            <p className="text-sm font-medium text-gray-200">
+                              {img.name}
+                              {img.dimensions && (
+                                <span className="text-gray-400 ml-2">
+                                  ({img.dimensions.width} × {
+                                    img.dimensions.height
+                                  } px)
+                                </span>
+                              )}
+                            </p>
+                            <div 
+                              className="relative w-full rounded border border-white/10" 
+                              style={{ aspectRatio: "4 / 3" }}
+                            >
+                              <NextImage
+                                src={img.url}
+                                alt={img.name}
+                                fill
+                                unoptimized
+                                className="object-contain rounded"
+                                sizes="(max-width: 1024px) 100vw, 50vw"
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
