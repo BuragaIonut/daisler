@@ -10,6 +10,7 @@ export default function Home() {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const aiExtensionRef = useRef<HTMLDivElement | null>(null);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   const [zoom, setZoom] = useState<number>(1);
   const [originX, setOriginX] = useState<number>(0);
@@ -52,6 +53,8 @@ export default function Home() {
   const [showingOptions, setShowingOptions] = useState(false);
   const [loadingExtensions, setLoadingExtensions] = useState(false);
   const [expectedExtensions, setExpectedExtensions] = useState(0);
+  const [expandedCardIndex, setExpandedCardIndex] = useState<number | null>(null);
+  const [fullscreenCardIndex, setFullscreenCardIndex] = useState<number | null>(null);
   
   // Debug info state
   const [debugInfo, setDebugInfo] = useState<{
@@ -228,6 +231,11 @@ export default function Home() {
       }
     }
   }, [fixedWidth, fixedHeight, cropMode, naturalSize]);
+
+  // Refresh preview when selection or zoom changes
+  useEffect(() => {
+    refreshToSendPreview();
+  }, [selection, zoom, imageSrc]);
 
   function computeCropPixelsFromSelection(sel: { x: number; y: number; width: number; height: number } | null) {
     if (!isValidSelection(sel)) return null;
@@ -732,6 +740,14 @@ export default function Home() {
       setShowingOptions(true);
       setLoadingExtensions(true);
       
+      // Scroll to AI Extension section after a short delay to let it render
+      setTimeout(() => {
+        aiExtensionRef.current?.scrollIntoView({ 
+          behavior: 'smooth', 
+          block: 'start' 
+        });
+      }, 100);
+      
       // Check if this is a two-step strategy
       if (data.status === "needs_two_step_extension") {
         console.log("Two-step AI extension required:", data.strategy);
@@ -1152,11 +1168,18 @@ export default function Home() {
             </div>
           </div>
           {imageSrc && (
-            <div
-              className="relative rounded-lg overflow-hidden glass w-full"
-              style={{ aspectRatio: naturalSize ? `${naturalSize.width} / ${naturalSize.height}` : "4 / 3" }}
-              ref={containerRef}
-               onMouseDown={(e: React.MouseEvent<HTMLDivElement>) => {
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Left side - Original image with zoom and crop */}
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium text-gray-300">Imaginea originală</h3>
+                <div
+                  className="relative rounded-lg overflow-hidden glass w-full"
+                  style={{ 
+                    aspectRatio: naturalSize ? `${naturalSize.width} / ${naturalSize.height}` : "4 / 3",
+                    maxHeight: '600px'
+                  }}
+                  ref={containerRef}
+                   onMouseDown={(e: React.MouseEvent<HTMLDivElement>) => {
                 const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
                 const x = e.clientX - rect.left;
                 const y = e.clientY - rect.top;
@@ -1264,6 +1287,45 @@ export default function Home() {
                   )}
                 </div>
               )}
+            </div>
+              </div>
+              
+              {/* Right side - Preview of what will be processed */}
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium text-gray-300">
+                  Imaginea care urmează să fie procesată
+                </h3>
+                {toSendPreviewUrl ? (
+                  <div 
+                    className="relative rounded-lg overflow-hidden glass w-full"
+                    style={{ 
+                      aspectRatio: naturalSize ? `${naturalSize.width} / ${naturalSize.height}` : "4 / 3",
+                      maxHeight: '600px'
+                    }}
+                  >
+                    <NextImage
+                      src={toSendPreviewUrl}
+                      alt="preview-to-process"
+                      fill
+                      unoptimized
+                      className="object-contain select-none"
+                      sizes="(max-width: 1024px) 100vw, 50vw"
+                    />
+                  </div>
+                ) : (
+                  <div 
+                    className="relative rounded-lg overflow-hidden glass w-full flex items-center justify-center"
+                    style={{ 
+                      aspectRatio: naturalSize ? `${naturalSize.width} / ${naturalSize.height}` : "4 / 3",
+                      maxHeight: '600px'
+                    }}
+                  >
+                    <p className="text-gray-400 text-sm">
+                      Faceți o selecție pentru a vedea previzualizarea
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -1486,17 +1548,21 @@ export default function Home() {
                   const dims = getCurrentFormatDimensions();
                   if (dims.width <= 0 || dims.height <= 0) return null;
                   
+                  // Convert to mm for consistent scaling
+                  const widthMm = globalUnit === "mm" ? dims.width : dims.width * 25.4;
+                  const heightMm = globalUnit === "mm" ? dims.height : dims.height * 25.4;
+                  
                   // Scale the preview rectangle to fit nicely
                   const maxSize = 120;
-                  const aspectRatio = dims.width / dims.height;
+                  const aspectRatio = widthMm / heightMm;
                   let previewWidth, previewHeight;
                   
                   if (aspectRatio > 1) {
-                    previewWidth = Math.min(maxSize, dims.width);
-                    previewHeight = previewWidth / aspectRatio;
+                    previewWidth = maxSize;
+                    previewHeight = maxSize / aspectRatio;
                   } else {
-                    previewHeight = Math.min(maxSize, dims.height);
-                    previewWidth = previewHeight * aspectRatio;
+                    previewHeight = maxSize;
+                    previewWidth = maxSize * aspectRatio;
                   }
                   
                   return (
@@ -1574,51 +1640,51 @@ export default function Home() {
                 const quality = calculateDpiQuality(currentWidth, currentHeight, printWidthMm, printHeightMm, d);
                 
                 if (quality.isVeryLowQuality) {
-                  // Red: Under 80% of target DPI
+                  // Under 80% of target DPI - significant upscaling needed
                   return (
-                    <div className="flex items-center justify-between p-4 rounded-lg border bg-red-50 border-red-200 text-red-800">
+                    <div className="flex items-center justify-between p-4 rounded-lg border bg-blue-50 border-blue-200 text-blue-800">
                       <div className="flex-1">
-                        <div className="font-bold text-lg mb-1">🚫 Calitate foarte scăzută</div>
+                        <div className="font-bold text-lg mb-1">⚠️ Upscaling necesar</div>
                         <div className="text-sm space-y-1">
-                          <div>DPI efectiv: {quality.effectiveDpi} (țintă: {d}) - {Math.round((quality.effectiveDpi / d) * 100)}%</div>
+                          <div>DPI actual: {quality.effectiveDpi} → {d} DPI (după upscaling)</div>
                           <div>Rezoluție actuală: {currentWidth}×{currentHeight}px</div>
-                          <div>Rezoluție recomandată: {quality.recommendedWidth}×{quality.recommendedHeight}px</div>
+                          <div>Rezoluție finală: {quality.recommendedWidth}×{quality.recommendedHeight}px</div>
                           <div className="mt-2 font-medium">
-                            Recomandare: Folosiți o imagine cu rezoluție mai mare pentru o calitate optimă de printare.
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-6xl ml-4">🚫</div>
-                    </div>
-                  );
-                } else if (quality.isLowQuality) {
-                  // Yellow: 80-95% of target DPI
-                  return (
-                    <div className="flex items-center justify-between p-4 rounded-lg border bg-yellow-50 border-yellow-200 text-yellow-800">
-                      <div className="flex-1">
-                        <div className="font-bold text-lg mb-1">⚠️ Calitate acceptabilă</div>
-                        <div className="text-sm space-y-1">
-                          <div>DPI efectiv: {quality.effectiveDpi} (țintă: {d}) - {Math.round((quality.effectiveDpi / d) * 100)}%</div>
-                          <div>Rezoluție actuală: {currentWidth}×{currentHeight}px</div>
-                          <div>Rezoluție recomandată: {quality.recommendedWidth}×{quality.recommendedHeight}px</div>
-                          <div className="mt-2 font-medium">
-                            Pentru calitate optimă, considerați o rezoluție mai mare.
+                            ℹ️ Imaginea va fi mărită cu {Math.round((quality.recommendedWidth / currentWidth) * 100)}% pentru a respecta DPI-ul țintă.
                           </div>
                         </div>
                       </div>
                       <div className="text-6xl ml-4">⚠️</div>
                     </div>
                   );
+                } else if (quality.isLowQuality) {
+                  // 80-95% of target DPI - minor upscaling
+                  return (
+                    <div className="flex items-center justify-between p-4 rounded-lg border bg-blue-50 border-blue-200 text-blue-800">
+                      <div className="flex-1">
+                        <div className="font-bold text-lg mb-1">📐 Upscaling minor</div>
+                        <div className="text-sm space-y-1">
+                          <div>DPI actual: {quality.effectiveDpi} → {d} DPI (după upscaling)</div>
+                          <div>Rezoluție actuală: {currentWidth}×{currentHeight}px</div>
+                          <div>Rezoluție finală: {quality.recommendedWidth}×{quality.recommendedHeight}px</div>
+                          <div className="mt-2 font-medium">
+                            ✓ Imaginea va fi ajustată la rezoluția cerută ({Math.round((quality.effectiveDpi / d) * 100)}% din DPI țintă).
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-6xl ml-4">📐</div>
+                    </div>
+                  );
                 } else {
-                  // Green: Over 95% of target DPI
+                  // Over 95% of target DPI - little or no upscaling
                   return (
                     <div className="flex items-center justify-between p-4 rounded-lg border bg-green-50 border-green-200 text-green-800">
                       <div className="flex-1">
-                        <div className="font-bold text-lg mb-1">✅ Calitate excelentă</div>
+                        <div className="font-bold text-lg mb-1">✅ Rezoluție optimă</div>
                         <div className="text-sm">
-                          <div>DPI efectiv: {quality.effectiveDpi} (țintă: {d}) - {Math.round((quality.effectiveDpi / d) * 100)}%</div>
-                          <div>Rezoluție actuală: {currentWidth}×{currentHeight}px</div>
-                          <div className="mt-2 font-medium">Perfectă pentru printare profesională!</div>
+                          <div>DPI actual: {quality.effectiveDpi} (țintă: {d}) - {Math.round((quality.effectiveDpi / d) * 100)}%</div>
+                          <div>Rezoluție: {currentWidth}×{currentHeight}px</div>
+                          <div className="mt-2 font-medium">✓ Imaginea are rezoluția perfectă pentru printare la {d} DPI!</div>
                         </div>
                       </div>
                       <div className="text-6xl ml-4">✅</div>
@@ -1638,14 +1704,14 @@ export default function Home() {
 
       {/* AI Extension Options - Full Width Section */}
       {showingOptions && (
-        <section className="mb-8">
+        <section className="mb-8" ref={aiExtensionRef}>
           <div className="card p-6">
             <h3 className="text-2xl font-semibold mb-3 text-[var(--accent)]">
               🎨 Selectează varianta dorită (AI Extension)
             </h3>
             <p className="text-base text-gray-300 mb-6">
               Algoritmul AI a generat variante cu diferite grade de suprapunere (overlap). 
-              Zona roșie indică unde va fi extinsă imaginea. 
+              Click pe o variantă pentru a vedea masca de extindere (zona roșie). 
               Selectează varianta care arată cel mai natural.
             </p>
             
@@ -1667,76 +1733,189 @@ export default function Home() {
               </div>
             )}
             
-            {/* Options Grid - 4 columns on desktop, 2 on tablet, 1 on mobile */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-              {extensionOptions.map((option, index) => (
-                <div
-                  key={`option-${option.overlap_percentage}-${index}`}
-                  onClick={() => setSelectedOptionIndex(index)}
-                  className={`relative cursor-pointer rounded-lg border-2 transition-all p-4 ${
-                    selectedOptionIndex === index
-                      ? "border-[var(--accent)] bg-[var(--accent)]/10 shadow-lg"
-                      : "border-white/20 hover:border-white/40 bg-white/5"
-                  }`}
+            {/* Dynamic Cards Layout - Always Row */}
+            {(() => {
+              const overlapPercentages = [3, 5, 10, 15]; // Expected 4 cards
+              const isAnyFullscreen = fullscreenCardIndex !== null;
+              
+              return (
+                <div 
+                  className="flex flex-row gap-4 mb-6"
+                  style={{ 
+                    transition: 'all 0.3s ease-in-out',
+                    minHeight: isAnyFullscreen ? '700px' : '400px'
+                  }}
                 >
-                  {/* Selection Radio Button */}
-                  <div className="absolute top-4 left-4 z-10">
-                    <input
-                      type="radio"
-                      checked={selectedOptionIndex === index}
-                      onChange={() => setSelectedOptionIndex(index)}
-                      className="w-5 h-5 cursor-pointer"
-                    />
-                  </div>
-                  
-                  {/* Overlap Label */}
-                  <div className="absolute top-4 right-4 z-10 bg-[var(--accent)] text-white px-3 py-1 rounded-full text-sm font-bold">
-                    {option.overlap_percentage}% overlap
-                  </div>
-                  
-                  {/* Images Container */}
-                  <div className="mt-8 space-y-3">
-                    <div>
-                      <h4 className="text-sm font-medium mb-2 text-gray-300">
-                        Imagine extinsă:
-                      </h4>
-                      <div className="relative w-full rounded border border-white/20 overflow-hidden" style={{ aspectRatio: "16/9" }}>
-                        <NextImage
-                          src={option.extended_image}
-                          alt={`Extended ${option.overlap_percentage}%`}
-                          fill
-                          unoptimized
-                          className="object-contain"
-                          sizes="(max-width: 768px) 100vw, (max-width: 1024px) 50vw, 25vw"
-                        />
-                      </div>
-                    </div>
+                  {overlapPercentages.map((overlapPct, index) => {
+                    // Check if this card has loaded data
+                    const option = extensionOptions.find(
+                      opt => Math.abs(opt.overlap_percentage - overlapPct) < 0.01
+                    );
+                    const isLoaded = !!option;
+                    const isExpanded = expandedCardIndex === index;
+                    const isSelected = selectedOptionIndex === index;
+                    const isFullscreen = fullscreenCardIndex === index;
+                    const isHidden = isAnyFullscreen && !isFullscreen;
                     
-                    <div>
-                      <h4 className="text-sm font-medium mb-2 text-gray-300">
-                        Preview mască (zona roșie = extindere):
-                      </h4>
-                      <div className="relative w-full rounded border border-white/20 overflow-hidden" style={{ aspectRatio: "16/9" }}>
-                        <NextImage
-                          src={option.mask_preview}
-                          alt={`Mask ${option.overlap_percentage}%`}
-                          fill
-                          unoptimized
-                          className="object-contain"
-                          sizes="(max-width: 768px) 100vw, (max-width: 1024px) 50vw, 25vw"
-                        />
+                    return (
+                      <div
+                        key={`card-${overlapPct}-${index}`}
+                        className={`relative rounded-xl transition-all duration-300 ease-in-out overflow-hidden ${
+                          isLoaded 
+                            ? 'cursor-pointer bg-white/5 backdrop-blur-sm'
+                            : 'cursor-wait bg-white/5 backdrop-blur-sm'
+                        } ${
+                          isSelected && isLoaded
+                            ? "border-[3px] border-[var(--accent)] shadow-lg shadow-[var(--accent)]/30"
+                            : isLoaded 
+                              ? "border-2 border-white/20 hover:border-white/30 shadow-md hover:shadow-lg"
+                              : "border-2 border-dashed border-white/30"
+                        } ${
+                          isFullscreen
+                            ? 'flex-[100]'
+                            : isHidden
+                              ? 'flex-[0] opacity-0 pointer-events-none'
+                              : 'flex-1'
+                        }`}
+                        style={{
+                          transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+                          minHeight: isFullscreen ? '700px' : '400px',
+                          boxShadow: isSelected && isLoaded
+                            ? '0 10px 25px rgba(0, 0, 0, 0.3), 0 6px 10px rgba(0, 0, 0, 0.2)'
+                            : isLoaded
+                              ? '0 4px 12px rgba(0, 0, 0, 0.2), 0 2px 6px rgba(0, 0, 0, 0.1)'
+                              : 'none'
+                        }}
+                        onClick={() => isLoaded && setSelectedOptionIndex(index)}
+                      >
+                        {isLoaded ? (
+                          <>
+                            {/* Selection Radio - Top Left */}
+                            <div className="absolute top-3 left-3 z-20">
+                              <div className={`w-7 h-7 rounded-full border-2 flex items-center justify-center transition-all shadow-lg ${
+                                isSelected 
+                                  ? 'bg-[var(--accent)] border-[var(--accent)]' 
+                                  : 'bg-white/90 border-gray-400'
+                              }`}>
+                                {isSelected && (
+                                  <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                  </svg>
+                                )}
+                              </div>
+                            </div>
+                            
+                            {/* Overlap Badge - Top Center */}
+                            <div className="absolute top-3 left-1/2 transform -translate-x-1/2 z-10 bg-black/50 backdrop-blur-sm px-3 py-1 rounded-md">
+                              <span className="text-white/90 font-medium text-xs">
+                                Suprapunere {option.overlap_percentage}%
+                              </span>
+                            </div>
+                            
+                            {/* Expand/Collapse Button - Top Right */}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFullscreenCardIndex(isFullscreen ? null : index);
+                              }}
+                              className="absolute top-3 right-3 z-20 bg-[var(--accent)] text-white p-2 rounded-lg hover:opacity-80 transition-opacity shadow-lg"
+                              title={isFullscreen ? "Închide" : "Extinde"}
+                            >
+                              {isFullscreen ? (
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              ) : (
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                                </svg>
+                              )}
+                            </button>
+                            
+                            {/* Content Area - Always use flex-row for side-by-side layout */}
+                            <div 
+                              className="relative w-full h-full p-4 pt-12 flex flex-row gap-2 transition-all duration-400"
+                            >
+                              {/* Extended Image - Always visible */}
+                              <div 
+                                className="relative transition-all duration-400"
+                                style={{
+                                  width: isFullscreen ? '50%' : '100%',
+                                  height: '100%',
+                                  minHeight: '350px'
+                                }}
+                              >
+                                <NextImage
+                                  src={option.extended_image}
+                                  alt={`Extended ${option.overlap_percentage}%`}
+                                  fill
+                                  unoptimized
+                                  className="object-contain"
+                                  sizes="(max-width: 768px) 100vw, 50vw"
+                                />
+                              </div>
+                              
+                              {/* Mask Preview - Shows on right when fullscreen */}
+                              <div 
+                                className="relative overflow-hidden transition-all duration-400"
+                                style={{
+                                  width: isFullscreen ? '50%' : '0%',
+                                  height: '100%',
+                                  minHeight: '350px',
+                                  opacity: isFullscreen ? 1 : 0
+                                }}
+                              >
+                                {isFullscreen && (
+                                  <NextImage
+                                    src={option.mask_preview}
+                                    alt={`Mask ${option.overlap_percentage}%`}
+                                    fill
+                                    unoptimized
+                                    className="object-contain"
+                                    sizes="(max-width: 768px) 100vw, 50vw"
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          /* Placeholder Loading State */
+                          <div className="w-full h-full flex flex-col items-center justify-center p-6">
+                            {/* Placeholder card structure */}
+                            <div className="flex flex-col items-center gap-4">
+                              {/* Spinner */}
+                              <svg className="animate-spin h-16 w-16 text-[var(--accent)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              
+                              {/* Loading text */}
+                              <div className="text-center space-y-2">
+                                <div className="text-base font-medium text-[var(--accent)]">
+                                  Se generează...
+                                </div>
+                                <div className="text-sm text-[var(--accent)]/80">
+                                  Overlap {overlapPct}%
+                                </div>
+                              </div>
+                              
+                              {/* Skeleton placeholder for image area */}
+                              <div className="w-32 h-32 bg-white/5 rounded-lg animate-pulse"></div>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  </div>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
+              );
+            })()}
             
-            {/* Continue Button */}
-            {!loadingExtensions && extensionOptions.length > 0 && (
+            {/* Continue Button - Available when at least one option is loaded */}
+            {extensionOptions.length > 0 && (
               <button
                 onClick={onSelectAndFinalize}
-                disabled={processingForPrint}
+                disabled={processingForPrint || !extensionOptions[selectedOptionIndex]}
                 className="w-full px-6 py-4 rounded-lg font-medium text-lg bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity flex items-center justify-center gap-2"
               >
                 {processingForPrint ? (
@@ -1747,8 +1926,10 @@ export default function Home() {
                     </svg>
                     Se finalizează procesarea...
                   </>
+                ) : extensionOptions[selectedOptionIndex] ? (
+                  `Continuă cu varianta ${extensionOptions[selectedOptionIndex].overlap_percentage}%`
                 ) : (
-                  `Continuă cu varianta ${extensionOptions[selectedOptionIndex]?.overlap_percentage}%`
+                  'Selectează o variantă pentru a continua'
                 )}
               </button>
             )}
@@ -1762,25 +1943,8 @@ export default function Home() {
           <h2 className="text-xl font-semibold mb-4">
             Rezultatul analizei/procesării
           </h2>
-          
-          {/* Preview of the exact image sent to the API (image uploads) */}
-          {toSendPreviewUrl && (
-            <div className="mb-6">
-              <h3 className="text-lg font-medium mb-3 text-[var(--accent)]">Imaginea care urmează să fie procesată</h3>
-              <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
-                <NextImage
-                  src={toSendPreviewUrl}
-                  alt="to-send"
-                  fill
-                  unoptimized
-                  className="object-contain rounded"
-                  sizes="(max-width: 1024px) 100vw, 50vw"
-                />
-              </div>
-            </div>
-          )}
 
-          {/* Processed result should appear here on the right side */}
+          {/* Processed result should appear here */}
           {processedUrl && (
             <div className="mb-6">
               <h3 className="text-lg font-medium mb-3 text-[var(--accent)]">Rezultatul în format PDF</h3>
@@ -1815,11 +1979,21 @@ export default function Home() {
                 onClick={async () => {
                   try {
                     if (!processedUrl) return;
+                    
+                    // Generate meaningful filename
+                    const originalName = file?.name || 'image';
+                    const nameWithoutExt = originalName.replace(/\.[^/.]+$/, '');
+                    const strategy = debugInfo.strategy || 'processed';
+                    const overlap = debugInfo.selectedOverlap || '';
+                    const filename = overlap 
+                      ? `${nameWithoutExt}_${strategy}_${overlap}percent.pdf`
+                      : `${nameWithoutExt}_${strategy}.pdf`;
+                    
                     // If already a PDF, download directly
                     if (processedType === 'application/pdf') {
                       const a = document.createElement('a');
                       a.href = processedUrl;
-                      a.download = 'processed.pdf';
+                      a.download = filename;
                       document.body.appendChild(a);
                       a.click();
                       document.body.removeChild(a);
@@ -1841,7 +2015,7 @@ export default function Home() {
                     setProcessedPdfUrl(pdfUrlLocal);
                     const a = document.createElement('a');
                     a.href = pdfUrlLocal;
-                    a.download = 'processed.pdf';
+                    a.download = filename;
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);

@@ -227,7 +227,7 @@ def ai_image_extension(
 ) -> tuple[str, str]:
     """Extend image using AI to target dimensions."""
     num_inference_steps = 12
-    prompt = ""
+    prompt = "seamless continuation"
     alignment = "Middle"
     overlap_left = overlap_right = overlap_top = overlap_bottom = False
     
@@ -1093,7 +1093,7 @@ async def extend_image_endpoint(
     file: UploadFile = File(...),
     target_width: int = Form(...),
     target_height: int = Form(...),
-    prompt: str = Form("high quality, professional, seamless"),
+    prompt: str = Form("seamless continuation"),
     overlap_percentage: int = Form(50),
     num_inference_steps: int = Form(20),
 ):
@@ -1598,10 +1598,10 @@ async def ai_extend_with_mask_endpoint(
             detail="Only image files accepted"
         )
     
-    if overlap_percentage < 5 or overlap_percentage > 20:
+    if overlap_percentage < 1 or overlap_percentage > 20:
         raise HTTPException(
             status_code=400,
-            detail="Overlap percentage must be between 5 and 20"
+            detail="Overlap percentage must be between 1 and 20"
         )
     
     try:
