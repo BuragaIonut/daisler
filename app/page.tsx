@@ -41,6 +41,18 @@ export default function Home() {
   const [bleedSize, setBleedSize] = useState<string>("3");
   const [processingForPrint, setProcessingForPrint] = useState(false);
   
+  // AI Extension selection state
+  const [extensionOptions, setExtensionOptions] = useState<Array<{
+    overlap_percentage: number;
+    extended_image: string;
+    mask_preview: string;
+    temp_path: string;
+  }>>([]);
+  const [selectedOptionIndex, setSelectedOptionIndex] = useState<number>(0);
+  const [showingOptions, setShowingOptions] = useState(false);
+  const [loadingExtensions, setLoadingExtensions] = useState(false);
+  const [expectedExtensions, setExpectedExtensions] = useState(0);
+  
   // Debug info state
   const [debugInfo, setDebugInfo] = useState<{
     currentImageDims?: { width: number; height: number };
@@ -52,6 +64,7 @@ export default function Home() {
     desiredRatio?: number;
     scalingFactor?: number;
     strategy?: string;
+    selectedOverlap?: number;
     effectiveDpi?: number;
     targetDpi?: number;
     bleedPx?: number;
@@ -692,12 +705,10 @@ export default function Home() {
     form.append("target_height", String(formatDims.height));
     form.append("unit", globalUnit);
     form.append("dpi", String(targetDpi));
-    const bleedValueToSend = parseFloat(bleedSize) || 0;
-    form.append("add_bleed", String(bleedValueToSend > 0));
-    form.append("bleed_mm", bleedSize);
 
     try {
-      const res = await fetch(`${BACKEND_URL}/process_for_print`, { 
+      // Step 1: Get AI extension parameters (doesn't do extension yet)
+      const res = await fetch(`${BACKEND_URL}/process_for_print_step1`, { 
         method: "POST", 
         body: form 
       });
@@ -705,16 +716,299 @@ export default function Home() {
         const t = await res.text();
         throw new Error(t || `Process failed (${res.status})`);
       }
+      
+      const data = await res.json();
+      console.log("Received strategy data from step1:", data);
+      
+      // If no extension needed, proceed directly to step 2
+      if (data.status === "no_extension_needed") {
+        // Call step 2 directly without showing options
+        await finalizePrint(fileToSend, formatDims, targetDpi);
+        return;
+      }
+      
+      // Reset and prepare for progressive loading
+      setExtensionOptions([]);
+      setShowingOptions(true);
+      setLoadingExtensions(true);
+      
+      // Check if this is a two-step strategy
+      if (data.status === "needs_two_step_extension") {
+        console.log("Two-step AI extension required:", data.strategy);
+        
+        const step1Params = data.step1_params;
+        const step2Params = data.step2_params;
+        
+        // Total extensions: 4 for step1 + 4 for step2 = 8, but only show final 4
+        setExpectedExtensions(step2Params.overlap_percentages.length);
+        
+        // Step 1: Convert to square (4 variants)
+        console.log("Phase 1: Converting to square...");
+        const step1Promises = step1Params.overlap_percentages.map(
+          async (overlapPct: number) => {
+            const aiForm = new FormData();
+            aiForm.append("file", fileToSend);
+            aiForm.append("target_width", String(step1Params.target_width));
+            aiForm.append("target_height", String(step1Params.target_height));
+            aiForm.append("overlap_percentage", String(overlapPct));
+            aiForm.append(
+              "overlap_horizontally",
+              String(step1Params.overlap_horizontally)
+            );
+            aiForm.append(
+              "overlap_vertically",
+              String(step1Params.overlap_vertically)
+            );
+            
+            console.log(
+              `Step1: AI extension to square with ${overlapPct}% overlap...`
+            );
+            
+            const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
+              method: "POST",
+              body: aiForm
+            });
+            
+            if (!aiRes.ok) {
+              const errorText = await aiRes.text();
+              throw new Error(
+                `Step1 AI extension failed for ${overlapPct}%: ${errorText}`
+              );
+            }
+            
+            const aiData = await aiRes.json();
+            console.log(
+              `✓ Step1 complete: square with ${overlapPct}% overlap`
+            );
+            return aiData;
+          }
+        );
+        
+        // Wait for all step1 to complete
+        const step1Results = await Promise.all(step1Promises);
+        console.log(
+          `Phase 1 complete: ${step1Results.length} square variants created`
+        );
+        
+        // Step 2: Convert each square to final ratio (4 variants)
+        console.log("Phase 2: Converting to final dimensions...");
+        const step2Promises = step1Results.map(
+          async (step1Result, index) => {
+            const overlapPct = step2Params.overlap_percentages[index];
+            
+            // Create a blob from step1 extended image to use as input for step2
+            const step1ImageBlob = await fetch(
+              step1Result.extended_image
+            ).then(r => r.blob());
+            const step1File = new File(
+              [step1ImageBlob],
+              `square_${overlapPct}.png`,
+              { type: "image/png" }
+            );
+            
+            const aiForm = new FormData();
+            aiForm.append("file", step1File);
+            aiForm.append("target_width", String(step2Params.target_width));
+            aiForm.append("target_height", String(step2Params.target_height));
+            aiForm.append("overlap_percentage", String(overlapPct));
+            aiForm.append(
+              "overlap_horizontally",
+              String(step2Params.overlap_horizontally)
+            );
+            aiForm.append(
+              "overlap_vertically",
+              String(step2Params.overlap_vertically)
+            );
+            
+            console.log(
+              `Step2: AI extension to final with ${overlapPct}% overlap...`
+            );
+            
+            const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
+              method: "POST",
+              body: aiForm
+            });
+            
+            if (!aiRes.ok) {
+              const errorText = await aiRes.text();
+              throw new Error(
+                `Step2 AI extension failed for ${overlapPct}%: ${errorText}`
+              );
+            }
+            
+            const aiData = await aiRes.json();
+            console.log(
+              `✓ Step2 complete: final with ${overlapPct}% overlap`
+            );
+            
+            // Add result immediately (progressive display)
+            setExtensionOptions(prev => {
+              const newOptions = [...prev, aiData];
+              return newOptions.sort(
+                (a, b) => a.overlap_percentage - b.overlap_percentage
+              );
+            });
+            
+            return aiData;
+          }
+        );
+        
+        // Wait for all step2 to complete
+        await Promise.all(step2Promises);
+        console.log(
+          `Phase 2 complete: ${step2Params.overlap_percentages.length} final variants`
+        );
+        
+      } else {
+        // Single-step strategy
+        const aiParams = data.ai_extension_params;
+        console.log("Single-step AI extension parameters:", aiParams);
+        
+        setExpectedExtensions(aiParams.overlap_percentages.length);
+        
+        // Call all AI extensions but display results as they arrive
+        const promises = aiParams.overlap_percentages.map(
+          async (overlapPct: number) => {
+            const aiForm = new FormData();
+            aiForm.append("file", fileToSend);
+            aiForm.append("target_width", String(aiParams.target_width));
+            aiForm.append("target_height", String(aiParams.target_height));
+            aiForm.append("overlap_percentage", String(overlapPct));
+            aiForm.append(
+              "overlap_horizontally",
+              String(aiParams.overlap_horizontally)
+            );
+            aiForm.append(
+              "overlap_vertically",
+              String(aiParams.overlap_vertically)
+            );
+            
+            console.log(`Calling AI extension for ${overlapPct}% overlap...`);
+            
+            const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
+              method: "POST",
+              body: aiForm
+            });
+            
+            if (!aiRes.ok) {
+              const errorText = await aiRes.text();
+              throw new Error(
+                `AI extension failed for ${overlapPct}%: ${errorText}`
+              );
+            }
+            
+            const aiData = await aiRes.json();
+            console.log(`✓ AI extension complete for ${overlapPct}% overlap`);
+            
+            // Add result immediately as it arrives (progressive display)
+            setExtensionOptions(prev => {
+              const newOptions = [...prev, aiData];
+              // Sort by overlap percentage to keep consistent order
+              return newOptions.sort(
+                (a, b) => a.overlap_percentage - b.overlap_percentage
+              );
+            });
+            
+            return aiData;
+          }
+        );
+        
+        // Wait for all to complete
+        await Promise.all(promises);
+        console.log(
+          `All ${aiParams.overlap_percentages.length} AI extensions complete`
+        );
+      }
+      
+      // All done, stop loading spinner
+      setLoadingExtensions(false);
+      setSelectedOptionIndex(2); // Default to 10% overlap (index 2)
+      setError(null);
+      
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Processing error";
+      setError(message);
+      setLoadingExtensions(false);
+    } finally {
+      setProcessingForPrint(false);
+    }
+  };
+
+  const finalizePrint = async (
+    imageFile: File | string,
+    formatDims: { width: number; height: number },
+    targetDpi: number
+  ) => {
+    setProcessingForPrint(true);
+    setError(null);
+    
+    try {
+      const form = new FormData();
+      
+      // If imageFile is a string (temp_path from step1), use it directly
+      if (typeof imageFile === 'string') {
+        form.append("selected_image_path", imageFile);
+      } else {
+        // This shouldn't happen in step1->step2 flow, but handle it
+        form.append("file", imageFile);
+      }
+      
+      form.append("target_width", String(formatDims.width));
+      form.append("target_height", String(formatDims.height));
+      form.append("unit", globalUnit);
+      form.append("dpi", String(targetDpi));
+      const bleedValueToSend = parseFloat(bleedSize) || 0;
+      form.append("add_bleed", String(bleedValueToSend > 0));
+      form.append("bleed_mm", bleedSize);
+
+      const res = await fetch(`${BACKEND_URL}/process_for_print_step2`, {
+        method: "POST",
+        body: form
+      });
+      
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `Final processing failed (${res.status})`);
+      }
+      
       const blob = await res.blob();
       if (processedUrl) URL.revokeObjectURL(processedUrl);
       setProcessedUrl(URL.createObjectURL(blob));
       setProcessedType("application/pdf");
+      
+      // Clear extension options after successful processing
+      setShowingOptions(false);
+      setExtensionOptions([]);
+      setLoadingExtensions(false);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Processing error";
       setError(message);
     } finally {
       setProcessingForPrint(false);
     }
+  };
+
+  const onSelectAndFinalize = async () => {
+    if (extensionOptions.length === 0 || selectedOptionIndex < 0) {
+      setError("Please select an option first");
+      return;
+    }
+    
+    const selectedOption = extensionOptions[selectedOptionIndex];
+    const formatDims = getCurrentFormatDimensions();
+    const targetDpi = parseInt(resizeDpi, 10);
+    
+    // Update debug info with selected overlap
+    setDebugInfo(prev => ({
+      ...prev,
+      selectedOverlap: selectedOption.overlap_percentage
+    }));
+    
+    await finalizePrint(
+      selectedOption.temp_path,
+      formatDims,
+      targetDpi
+    );
   };
 
   const checkHealth = async () => {
@@ -774,7 +1068,9 @@ export default function Home() {
           </div>
         </div>
       </header>
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+      
+      {/* Main Form Section - Full Width */}
+      <section className="mb-8">
         <div className="card p-6">
         <h2 className="text-xl font-semibold mb-2">Analizează/Procesează fișierul</h2>
         <form onSubmit={onSubmit} className="space-y-5">
@@ -1338,9 +1634,134 @@ export default function Home() {
           <p className="mt-4 text-red-400 text-sm whitespace-pre-wrap">{error}</p>
         )}
         </div>
+      </section>
 
+      {/* AI Extension Options - Full Width Section */}
+      {showingOptions && (
+        <section className="mb-8">
+          <div className="card p-6">
+            <h3 className="text-2xl font-semibold mb-3 text-[var(--accent)]">
+              🎨 Selectează varianta dorită (AI Extension)
+            </h3>
+            <p className="text-base text-gray-300 mb-6">
+              Algoritmul AI a generat variante cu diferite grade de suprapunere (overlap). 
+              Zona roșie indică unde va fi extinsă imaginea. 
+              Selectează varianta care arată cel mai natural.
+            </p>
+            
+            {/* Progressive Loading Info */}
+            {loadingExtensions && (
+              <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg flex items-center gap-3">
+                <svg className="animate-spin h-6 w-6 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <div>
+                  <div className="font-medium text-blue-300">
+                    Se generează variantele AI... ({extensionOptions.length}/{expectedExtensions})
+                  </div>
+                  <div className="text-sm text-blue-400 mt-1">
+                    Rezultatele apar pe măsură ce sunt finalizate
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Options Grid - 4 columns on desktop, 2 on tablet, 1 on mobile */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+              {extensionOptions.map((option, index) => (
+                <div
+                  key={`option-${option.overlap_percentage}-${index}`}
+                  onClick={() => setSelectedOptionIndex(index)}
+                  className={`relative cursor-pointer rounded-lg border-2 transition-all p-4 ${
+                    selectedOptionIndex === index
+                      ? "border-[var(--accent)] bg-[var(--accent)]/10 shadow-lg"
+                      : "border-white/20 hover:border-white/40 bg-white/5"
+                  }`}
+                >
+                  {/* Selection Radio Button */}
+                  <div className="absolute top-4 left-4 z-10">
+                    <input
+                      type="radio"
+                      checked={selectedOptionIndex === index}
+                      onChange={() => setSelectedOptionIndex(index)}
+                      className="w-5 h-5 cursor-pointer"
+                    />
+                  </div>
+                  
+                  {/* Overlap Label */}
+                  <div className="absolute top-4 right-4 z-10 bg-[var(--accent)] text-white px-3 py-1 rounded-full text-sm font-bold">
+                    {option.overlap_percentage}% overlap
+                  </div>
+                  
+                  {/* Images Container */}
+                  <div className="mt-8 space-y-3">
+                    <div>
+                      <h4 className="text-sm font-medium mb-2 text-gray-300">
+                        Imagine extinsă:
+                      </h4>
+                      <div className="relative w-full rounded border border-white/20 overflow-hidden" style={{ aspectRatio: "16/9" }}>
+                        <NextImage
+                          src={option.extended_image}
+                          alt={`Extended ${option.overlap_percentage}%`}
+                          fill
+                          unoptimized
+                          className="object-contain"
+                          sizes="(max-width: 768px) 100vw, (max-width: 1024px) 50vw, 25vw"
+                        />
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <h4 className="text-sm font-medium mb-2 text-gray-300">
+                        Preview mască (zona roșie = extindere):
+                      </h4>
+                      <div className="relative w-full rounded border border-white/20 overflow-hidden" style={{ aspectRatio: "16/9" }}>
+                        <NextImage
+                          src={option.mask_preview}
+                          alt={`Mask ${option.overlap_percentage}%`}
+                          fill
+                          unoptimized
+                          className="object-contain"
+                          sizes="(max-width: 768px) 100vw, (max-width: 1024px) 50vw, 25vw"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            {/* Continue Button */}
+            {!loadingExtensions && extensionOptions.length > 0 && (
+              <button
+                onClick={onSelectAndFinalize}
+                disabled={processingForPrint}
+                className="w-full px-6 py-4 rounded-lg font-medium text-lg bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity flex items-center justify-center gap-2"
+              >
+                {processingForPrint ? (
+                  <>
+                    <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Se finalizează procesarea...
+                  </>
+                ) : (
+                  `Continuă cu varianta ${extensionOptions[selectedOptionIndex]?.overlap_percentage}%`
+                )}
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Results Section - Full Width */}
+      <section className="mb-8">
         <div className="card p-6">
-          <h2 className="text-xl font-semibold mb-2">Rezultatul analizei/procesării</h2>
+          <h2 className="text-xl font-semibold mb-4">
+            Rezultatul analizei/procesării
+          </h2>
           
           {/* Preview of the exact image sent to the API (image uploads) */}
           {toSendPreviewUrl && (
@@ -1363,20 +1784,27 @@ export default function Home() {
           {processedUrl && (
             <div className="mb-6">
               <h3 className="text-lg font-medium mb-3 text-[var(--accent)]">Rezultatul în format PDF</h3>
-              <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
-                {processedType === 'application/pdf' ? (
-                  <iframe title="processed-pdf" src={processedUrl} className="w-full h-[60vh] rounded" />
-                ) : (
+              {processedType === 'application/pdf' ? (
+                <div className="w-full rounded border border-white/10 overflow-hidden">
+                  <iframe 
+                    title="processed-pdf" 
+                    src={processedUrl} 
+                    className="w-full rounded" 
+                    style={{ height: '80vh', minHeight: '600px' }}
+                  />
+                </div>
+              ) : (
+                <div className="relative w-full rounded border border-white/10" style={{ aspectRatio: "4 / 3" }}>
                   <NextImage
                     src={processedUrl}
                     alt="processed"
                     fill
                     unoptimized
                     className="object-contain rounded"
-                    sizes="(max-width: 1024px) 100vw, 50vw"
+                    sizes="100vw"
                   />
-                )}
-              </div>
+                </div>
+              )}
             </div>
           )}
           {processedUrl && (
@@ -1555,20 +1983,31 @@ export default function Home() {
                   {/* Processing Strategy */}
                   {debugInfo.strategy && (
                     <div className="space-y-3">
-                      <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                      <h4 className="font-bold text-[var(--accent)] text-sm \
+uppercase tracking-wide">
                         🎯 Extension Strategy
                       </h4>
                       <div className="pl-4 space-y-1 text-sm">
-                        <p className="text-gray-300 font-mono bg-white/5 p-2 rounded border border-white/10">
+                        <p className="text-gray-300 font-mono bg-white/5 p-2 \
+rounded border border-white/10">
                           {debugInfo.strategy}
                         </p>
+                        {debugInfo.selectedOverlap && (
+                          <p className="text-gray-300 mt-2">
+                            <span className="font-medium">
+                              Selected Overlap:
+                            </span>{" "}
+                            {debugInfo.selectedOverlap}%
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}
                   
                   {/* Scaling & DPI */}
                   <div className="space-y-3">
-                    <h4 className="font-bold text-[var(--accent)] text-sm uppercase tracking-wide">
+                    <h4 className="font-bold text-[var(--accent)] text-sm \
+uppercase tracking-wide">
                       🔬 Scaling & Quality
                     </h4>
                     
@@ -1648,8 +2087,6 @@ export default function Home() {
           )}
         </div>
       </section>
-
-      {/* Removed separate results section; processed image now appears in the right panel above */}
-      </div>
+    </div>
   );
 }

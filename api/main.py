@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from io import BytesIO
 import base64
 import logging
@@ -8,11 +8,15 @@ import os
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
 import fitz
-from PIL import Image
+from PIL import Image, ImageDraw
 from pydantic import BaseModel
 from gradio_client import Client, handle_file
 import tempfile
 from openai import OpenAI
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import uuid
+from mask_helpers import preview_image_and_mask
 
 class AnalysisResponse(BaseModel):
     result: str
@@ -566,7 +570,7 @@ def image_to_pdf_with_dimensions(
 ) -> fitz.Document:
     """Convert PIL image to PDF document with proper DPI."""
     with BytesIO() as img_buffer:
-        image.save(img_buffer, format="PNG")
+        image.save(img_buffer, format="JPEG")
         img_bytes = img_buffer.getvalue()
     
     # Calculate dimensions in points (72 points per inch)
@@ -1304,4 +1308,493 @@ def read_pdf_with_fitz(bytes_data):
     except Exception as exc:
         logger.exception("read_pdf_with_fitz failed: %s", exc)
         raise exc
+
+
+def ai_extension_parallel_overlaps(
+    image_path: str,
+    target_width: int,
+    target_height: int,
+    overlap_horizontally: bool,
+    overlap_vertically: bool,
+    overlap_percentages: list[int] = [2.5, 5, 10, 15]
+) -> list[dict]:
+    """
+    Run AI extension in parallel with multiple overlap percentages.
+    Returns list of results with extended images and mask previews.
+    """
+    logger.info(
+        f"Running parallel AI extensions with overlaps: {overlap_percentages}"
+    )
     
+    # Load original image for mask preview generation
+    orig_image = Image.open(image_path)
+    
+    # Prepare overlap flags for mask preview
+    overlap_left = overlap_right = False
+    overlap_top = overlap_bottom = False
+    if overlap_vertically:
+        overlap_top = overlap_bottom = True
+    if overlap_horizontally:
+        overlap_left = overlap_right = True
+    
+    # Run AI extensions in parallel using ThreadPoolExecutor
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {}
+        for overlap_pct in overlap_percentages:
+            logger.info(f"Submitting AI extension task for {overlap_pct}% overlap")
+            future = executor.submit(
+                ai_image_extension,
+                image_path,
+                target_width,
+                target_height,
+                overlap_horizontally,
+                overlap_vertically,
+                overlap_pct
+            )
+            futures[future] = overlap_pct
+        
+        logger.info(f"Submitted {len(futures)} AI extension tasks. Waiting for completion...")
+        
+        # Collect results using as_completed for better tracking
+        for future in as_completed(futures):
+            overlap_pct = futures[future]
+            try:
+                logger.info(f"Processing result for {overlap_pct}% overlap...")
+                extended_path, mask_path = future.result(timeout=120)
+                
+                logger.info(f"AI extension succeeded for {overlap_pct}%, generating mask preview...")
+                
+                # Generate mask preview
+                mask_preview = preview_image_and_mask(
+                    orig_image,
+                    target_width,
+                    target_height,
+                    overlap_pct,
+                    "Full",
+                    100,
+                    "Middle",
+                    overlap_left,
+                    overlap_right,
+                    overlap_top,
+                    overlap_bottom
+                )
+                
+                # Save mask preview to temp file
+                mask_preview_path = extended_path.replace(
+                    ".webp", 
+                    f"_mask_preview.png"
+                )
+                mask_preview.save(mask_preview_path, "PNG")
+                
+                results.append({
+                    "overlap_percentage": overlap_pct,
+                    "extended_image_path": extended_path,
+                    "mask_path": mask_path,
+                    "mask_preview_path": mask_preview_path
+                })
+                
+                logger.info(
+                    f"✓ Completed AI extension with {overlap_pct}% overlap "
+                    f"({len(results)}/{len(overlap_percentages)})"
+                )
+            except Exception as e:
+                logger.error(
+                    f"✗ FAILED AI extension with {overlap_pct}% overlap: {e}",
+                    exc_info=True
+                )
+    
+    # Sort results by overlap percentage for consistency
+    results.sort(key=lambda x: x["overlap_percentage"])
+    
+    logger.info(f"Completed {len(results)} parallel AI extensions")
+    return results
+
+
+@app.post(f"{prefix}/ai_extend_with_mask")
+async def ai_extend_with_mask_endpoint(
+    file: UploadFile = File(...),
+    target_width: int = Form(...),
+    target_height: int = Form(...),
+    overlap_percentage: int = Form(10),
+    overlap_horizontally: bool = Form(False),
+    overlap_vertically: bool = Form(False),
+):
+    """
+    AI extend an image with mask preview generation.
+    
+    Single-responsibility endpoint for AI extension.
+    Returns extended image and mask preview as base64 data URLs.
+    
+    Args:
+        file: Image file to extend
+        target_width: Target width in pixels
+        target_height: Target height in pixels  
+        overlap_percentage: Overlap percentage (5-20)
+        overlap_horizontally: Extend left/right
+        overlap_vertically: Extend top/bottom
+        
+    Returns:
+        JSON with extended_image and mask_preview as base64 data URLs
+    """
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only image files accepted"
+        )
+    
+    if overlap_percentage < 5 or overlap_percentage > 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Overlap percentage must be between 5 and 20"
+        )
+    
+    try:
+        raw = await file.read()
+        pil_image = Image.open(BytesIO(raw)).convert("RGB")
+        
+        # Save to temp file for AI extension
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, f"input_{uuid.uuid4()}.png")
+        pil_image.save(temp_path, "PNG")
+        
+        logger.info(
+            f"AI extending to {target_width}x{target_height}px "
+            f"with {overlap_percentage}% overlap "
+            f"(h={overlap_horizontally}, v={overlap_vertically})"
+        )
+        
+        # Call AI extension
+        extended_path, mask_path = ai_image_extension(
+            temp_path,
+            target_width,
+            target_height,
+            overlap_horizontally,
+            overlap_vertically,
+            overlap_percentage
+        )
+        
+        # Generate mask preview
+        overlap_left = overlap_right = overlap_horizontally
+        overlap_top = overlap_bottom = overlap_vertically
+        
+        mask_preview = preview_image_and_mask(
+            pil_image,
+            target_width,
+            target_height,
+            overlap_percentage,
+            "Full",
+            100,
+            "Middle",
+            overlap_left,
+            overlap_right,
+            overlap_top,
+            overlap_bottom
+        )
+        
+        # Convert to RGB and encode extended image
+        ext_img = Image.open(extended_path).convert("RGB")
+        ext_img_b64 = encode_image_from_pil(ext_img)
+        
+        # Encode mask preview
+        mask_prev_b64 = encode_image_from_pil(mask_preview)
+        
+        logger.info(
+            f"✓ AI extension complete for {overlap_percentage}% overlap"
+        )
+        
+        return JSONResponse(content={
+            "status": "success",
+            "overlap_percentage": overlap_percentage,
+            "extended_image": f"data:image/png;base64,{ext_img_b64}",
+            "mask_preview": f"data:image/png;base64,{mask_prev_b64}",
+            "temp_path": extended_path
+        })
+        
+    except Exception as exc:
+        logger.exception(f"AI extension failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post(f"{prefix}/process_for_print_step1")
+async def process_for_print_step1_endpoint(
+    file: UploadFile = File(...),
+    target_width: float = Form(...),
+    target_height: float = Form(...),
+    unit: str = Form("mm"),
+    dpi: int = Form(300),
+):
+    """
+    Step 1: Calculate strategy and return extension parameters.
+    
+    Does NOT perform AI extension - just returns the parameters needed.
+    Frontend will call /ai_extend_with_mask endpoint 4 times in parallel.
+    """
+    # Only accept images
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only image files are accepted. Convert PDFs via " \
+                   "/pdf_to_image first."
+        )
+
+    # Validate inputs
+    if target_width <= 0 or target_height <= 0 or dpi <= 0:
+        raise HTTPException(status_code=400, detail="Invalid dimensions/DPI")
+    
+    unit = unit.strip().lower()
+    if unit not in ("mm", "inch", "in", "inches"):
+        raise HTTPException(status_code=400, detail="Unit must be mm or inch")
+
+    # Convert to mm
+    if unit == "mm":
+        target_width_mm = target_width
+        target_height_mm = target_height
+    else:
+        target_width_mm = target_width * 25.4
+        target_height_mm = target_height * 25.4
+
+    raw = await file.read()
+    
+    try:
+        pil_image = Image.open(BytesIO(raw)).convert("RGB")
+        actual_x_px, actual_y_px, current_ratio = \
+            read_image_dimensions_and_ratio(pil_image)
+        
+        # Calculate desired dimensions
+        desired_x_inch = target_width_mm / 25.4
+        desired_y_inch = target_height_mm / 25.4
+        desired_x_px, desired_y_px, desired_ratio = \
+            calculate_desired_pixels(desired_x_inch, desired_y_inch, dpi)
+        
+        # Determine extension strategy
+        strategy = determine_extension_strategy(current_ratio, desired_ratio)
+        logger.info(f"Strategy: {strategy}")
+        
+        # If no extension needed, return early
+        if strategy == "no_extension_needed":
+            return JSONResponse(content={
+                "status": "no_extension_needed",
+                "message": "Image already matches desired aspect ratio",
+                "strategy": strategy,
+                "current_ratio": current_ratio,
+                "desired_ratio": desired_ratio
+            })
+        
+        # Determine target dimensions and overlap directions for AI
+        # Check if this is a two-step strategy
+        is_two_step = strategy in [
+            "portrait_to_square_to_landscape",
+            "landscape_to_square_to_portrait"
+        ]
+        
+        if is_two_step:
+            # Two-step strategies require intermediate square conversion
+            logger.info(f"Two-step strategy detected: {strategy}")
+            
+            # Step 1: Convert to square (1024x1024)
+            if strategy == "portrait_to_square_to_landscape":
+                step1_params = (1024, 1024, True, False)  # Extend horizontally
+            else:  # landscape_to_square_to_portrait
+                step1_params = (1024, 1024, False, True)  # Extend vertically
+            
+            # Step 2: Convert square to final ratio
+            rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+            if strategy == "portrait_to_square_to_landscape":
+                step2_params = (rec_x, rec_y, True, False)  # Extend horizontally
+            else:  # landscape_to_square_to_portrait
+                step2_params = (rec_x, rec_y, False, True)  # Extend vertically
+            
+            logger.info(
+                f"Two-step parameters: "
+                f"Step1={step1_params[0]}x{step1_params[1]}, "
+                f"Step2={step2_params[0]}x{step2_params[1]}"
+            )
+            
+            return JSONResponse(content={
+                "status": "needs_two_step_extension",
+                "strategy": strategy,
+                "current_ratio": current_ratio,
+                "desired_ratio": desired_ratio,
+                "target_dimensions_px": {
+                    "width": desired_x_px,
+                    "height": desired_y_px
+                },
+                "step1_params": {
+                    "target_width": step1_params[0],
+                    "target_height": step1_params[1],
+                    "overlap_horizontally": step1_params[2],
+                    "overlap_vertically": step1_params[3],
+                    "overlap_percentages": [2.5, 5, 10, 15]
+                },
+                "step2_params": {
+                    "target_width": step2_params[0],
+                    "target_height": step2_params[1],
+                    "overlap_horizontally": step2_params[2],
+                    "overlap_vertically": step2_params[3],
+                    "overlap_percentages": [2.5, 5, 10, 15]
+                }
+            })
+        else:
+            # Single-step strategy
+            recommended_x, recommended_y, overlap_h, overlap_v = \
+                _get_extension_params(strategy, desired_ratio)
+            
+            # Return parameters for frontend to call AI extension endpoint
+            logger.info(
+                f"Returning AI extension parameters: "
+                f"{recommended_x}x{recommended_y}, "
+                f"overlap_h={overlap_h}, overlap_v={overlap_v}"
+            )
+            
+            return JSONResponse(content={
+                "status": "needs_extension",
+                "strategy": strategy,
+                "current_ratio": current_ratio,
+                "desired_ratio": desired_ratio,
+                "target_dimensions_px": {
+                    "width": desired_x_px,
+                    "height": desired_y_px
+                },
+                "ai_extension_params": {
+                    "target_width": recommended_x,
+                    "target_height": recommended_y,
+                    "overlap_horizontally": overlap_h,
+                    "overlap_vertically": overlap_v,
+                    "overlap_percentages": [2.5, 5, 10, 15]
+                }
+            })
+        
+    except Exception as exc:
+        logger.exception("Step 1 failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _get_extension_params(strategy: str, desired_ratio: float) \
+        -> tuple[int, int, bool, bool]:
+    """Helper to get extension parameters for a given strategy."""
+    if strategy == "landscape_extend_width":
+        rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+        return rec_x, rec_y, True, False
+    elif strategy == "landscape_extend_height":
+        rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+        return rec_x, rec_y, False, True
+    elif strategy == "portrait_extend_width":
+        rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+        return rec_x, rec_y, True, False
+    elif strategy == "portrait_extend_height":
+        rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+        return rec_x, rec_y, False, True
+    elif strategy == "landscape_to_square":
+        return 1024, 1024, False, True
+    elif strategy == "portrait_to_square":
+        return 1024, 1024, True, False
+    elif strategy == "square_to_landscape":
+        rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+        return rec_x, rec_y, True, False
+    elif strategy == "square_to_portrait":
+        rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+        return rec_x, rec_y, False, True
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+
+@app.post(f"{prefix}/process_for_print_step2")
+async def process_for_print_step2_endpoint(
+    selected_image_path: str = Form(...),
+    target_width: float = Form(...),
+    target_height: float = Form(...),
+    unit: str = Form("mm"),
+    dpi: int = Form(300),
+    add_bleed: bool = Form(True),
+    bleed_mm: float = Form(3.0),
+):
+    """
+    Step 2: Complete processing with selected AI extension result.
+    
+    Takes the selected extended image and completes:
+    - Add mirror bleed
+    - Upscale to target DPI
+    - Convert to PDF with cutline
+    """
+    unit = unit.strip().lower()
+    if unit == "mm":
+        target_width_mm = target_width
+        target_height_mm = target_height
+    else:
+        target_width_mm = target_width * 25.4
+        target_height_mm = target_height * 25.4
+
+    try:
+        # Load the selected extended image
+        pil_image = Image.open(selected_image_path).convert("RGB")
+        
+        # Step 7: Add mirror bleed
+        if add_bleed and bleed_mm > 0:
+            bleed_inch = bleed_mm / 25.4
+            bleed_px = calculate_desired_bleed_in_pixels(bleed_inch, dpi)
+            pil_image, x1, y1, x2, y2 = add_desired_mirror_bleed(
+                pil_image, bleed_px
+            )
+            logger.info(f"Step 7: Added {bleed_mm}mm bleed ({bleed_px}px)")
+        else:
+            w, h = pil_image.size
+            x1, y1, x2, y2 = 0, 0, w, h
+            logger.info("Step 7: No bleed added")
+        
+        # Step 8: Upscale with LANCZOS
+        desired_x_inch = target_width_mm / 25.4
+        desired_y_inch = target_height_mm / 25.4
+        desired_x_px, desired_y_px, _ = calculate_desired_pixels(
+            desired_x_inch, desired_y_inch, dpi
+        )
+        
+        actual_x_px, actual_y_px, _ = read_image_dimensions_and_ratio(
+            pil_image
+        )
+        scaling_factor = determine_scaling_factor(
+            desired_x_px, desired_y_px, actual_x_px, actual_y_px
+        )
+        
+        if scaling_factor > 1.01:
+            pil_image = upscale_with_LANCZOS(pil_image, scaling_factor)
+            logger.info(f"Step 8: Upscaled by {scaling_factor:.2f}x")
+        else:
+            logger.info("Step 8: No upscaling needed")
+        
+        # Step 9: Convert to CMYK
+        pil_image = image_to_CMYK(pil_image)
+        logger.info("Step 9: Converted to CMYK")
+        
+        # Step 10: Create PDF with cutline
+        pdf_doc = image_to_pdf_with_dimensions(pil_image, dpi)
+        
+        if add_bleed and bleed_mm > 0:
+            # Calculate cutline position in points
+            bleed_pts = (bleed_mm / 25.4) * 72
+            page = pdf_doc[0]
+            pw, ph = page.rect.width, page.rect.height
+            cutline_rect = (
+                bleed_pts,
+                bleed_pts,
+                pw - bleed_pts,
+                ph - bleed_pts
+            )
+            pdf_doc = add_cutline(pdf_doc, cutline_rect)
+            logger.info("Step 10: Added CutContour spot color cutline")
+        else:
+            logger.info("Step 10: No cutline added (no bleed)")
+        
+        pdf_bytes = pdf_doc.tobytes()
+        
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=print_ready.pdf"
+            }
+        )
+        
+    except Exception as exc:
+        logger.exception("Step 2 failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
