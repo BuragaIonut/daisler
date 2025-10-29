@@ -1471,7 +1471,7 @@ def ai_extension_parallel_overlaps(
     target_height: int,
     overlap_horizontally: bool,
     overlap_vertically: bool,
-    overlap_percentages: list[int] = [2.5, 5, 10, 15]
+    overlap_percentages: list[int] = [3, 5, 10, 15]
 ) -> list[dict]:
     """
     Run AI extension in parallel with multiple overlap percentages.
@@ -1780,14 +1780,14 @@ async def process_for_print_step1_endpoint(
                     "target_height": step1_params[1],
                     "overlap_horizontally": step1_params[2],
                     "overlap_vertically": step1_params[3],
-                    "overlap_percentages": [2.5, 5, 10, 15]
+                    "overlap_percentages": [3, 5, 10, 15]
                 },
                 "step2_params": {
                     "target_width": step2_params[0],
                     "target_height": step2_params[1],
                     "overlap_horizontally": step2_params[2],
                     "overlap_vertically": step2_params[3],
-                    "overlap_percentages": [2.5, 5, 10, 15]
+                    "overlap_percentages": [3, 5, 10, 15]
                 }
             })
         else:
@@ -1816,7 +1816,7 @@ async def process_for_print_step1_endpoint(
                     "target_height": recommended_y,
                     "overlap_horizontally": overlap_h,
                     "overlap_vertically": overlap_v,
-                    "overlap_percentages": [2.5, 5, 10, 15]
+                    "overlap_percentages": [3, 5, 10, 15]
                 }
             })
         
