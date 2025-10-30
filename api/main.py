@@ -5,6 +5,7 @@ from io import BytesIO
 import base64
 import logging
 import os
+import json
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
 import fitz
@@ -241,7 +242,7 @@ def ai_image_extension(
         f"overlap_h={overlap_horizontally}, overlap_v={overlap_vertically}"
     )
     
-    client = Client("https://8end7ai6stn3cs-7860.proxy.runpod.net/")
+    client = Client("https://ogff6k0h7xmm34-7860.proxy.runpod.net/")
     
     result = client.predict(
         image=handle_file(image_path),
@@ -437,6 +438,7 @@ def add_desired_mirror_bleed(
     
     x1, y1 = pad, pad
     x2, y2 = pad + w, pad + h
+    logger.info(f"Added mirror bleed: ({x1}, {y1}), ({x2}, {y2})")
     
     return expanded, x1, y1, x2, y2
 
@@ -461,6 +463,7 @@ def add_cutline(
     stroke_width: float = 0.5
 ) -> fitz.Document:
     """Add rectangle cutline (spot color stroke) to PDF page."""
+    logger.info(f"Rectangle cutline on page {page_num}, rect={rect}")
     page = doc[page_num]
     page_xref = page.xref
 
@@ -514,13 +517,21 @@ def add_cutline(
 
     # Build rectangle content
     x0, y0, x1, y1 = rect
+    rect_width = x1 - x0
+    rect_height = y1 - y0
     w = 0 if hairline else stroke_width
+    
+    logger.info(
+        f"Drawing cutline rectangle: x={x0:.2f}, y={y0:.2f}, "
+        f"width={rect_width:.2f}, height={rect_height:.2f}"
+    )
+    
     content = (
         "q\n"
         f"{w} w\n"
         "/CS1 CS\n"
         "1 SCN\n"
-        f"{x0} {y0} {x1 - x0} {y1 - y0} re\n"
+        f"{x0} {y0} {rect_width} {rect_height} re\n"
         "S\n"
         "Q\n"
     ).encode("ascii")
@@ -757,7 +768,14 @@ async def process_for_print_endpoint(
     bleed_mm: float = Form(3.0),
 ):
     """
-    Complete workflow for print production.
+    Complete workflow for print production with comprehensive debugging.
+    
+    Debug information includes:
+    - Bleed: Pixel/inch measurements, trim box coordinates before/after
+    - Upscale: Scale factor, dimensions before/after, trim box tracking
+    - Cutline: Conversion formulas (with/without doubling), Y-flip \
+calculations,
+               expected vs actual bleed distances in mm/inches/points
     
     Workflow (frontend handles PDF conversion + cropping first):
     1. Frontend: Upload PDF → Convert to image via /pdf_to_image
@@ -766,10 +784,10 @@ async def process_for_print_endpoint(
     4. Backend: Calculate desired dimensions, ratio, scaling factor
     5. Backend: Determine extension strategy
     6. Backend: Extend image with AI if needed
-    7. Backend: Add mirror bleed (if enabled)
-    8. Backend: Upscale image to final dimensions
-    9. Backend: Convert to PDF with cutline
-    10. Backend: Return downloadable PDF
+    7. Backend: Add mirror bleed (if enabled) - TRACKED IN DEBUG
+    8. Backend: Upscale image to final dimensions - TRACKED IN DEBUG
+    9. Backend: Convert to PDF with cutline - TRACKED IN DEBUG
+    10. Backend: Return downloadable PDF with X-Debug-Info header
     
     Args:
         file: Image file ONLY (PNG/JPEG) - PDFs already converted by frontend
@@ -781,7 +799,8 @@ async def process_for_print_endpoint(
         bleed_mm: Bleed size in mm (default 3.0)
         
     Returns:
-        PDF with bleed and cutline
+        PDF with bleed and cutline, plus comprehensive debug info in \
+X-Debug-Info header
     """
     # Only accept images - PDFs are converted by frontend first
     if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
@@ -872,14 +891,59 @@ async def process_for_print_endpoint(
         # Step 7: Add mirror bleed (before upscaling)
         trim_x1, trim_y1, trim_x2, trim_y2 = 0, 0, current_w, current_h
         
+        # Store original image coordinates before bleed (for debug)
+        bleed_debug = {
+            "step": "7_add_bleed",
+            "bleed_mm": bleed_mm,
+            "bleed_px": bleed_px,
+            "image_before_bleed": {
+                "width_px": current_w,
+                "height_px": current_h,
+                "width_inches": current_w / dpi,
+                "height_inches": current_h / dpi
+            }
+        }
+        
         if add_bleed and bleed_px > 0:
             pil_image, trim_x1, trim_y1, trim_x2, trim_y2 = \
                 add_desired_mirror_bleed(pil_image, bleed_px)
+            
+            bleed_debug["image_after_bleed"] = {
+                "width_px": pil_image.width,
+                "height_px": pil_image.height,
+                "width_inches": pil_image.width / dpi,
+                "height_inches": pil_image.height / dpi
+            }
+            bleed_debug["trim_box_pixels"] = {
+                "x1": trim_x1,
+                "y1": trim_y1,
+                "x2": trim_x2,
+                "y2": trim_y2,
+                "width": trim_x2 - trim_x1,
+                "height": trim_y2 - trim_y1,
+                "note": "Where original image starts in bleeded image"
+            }
+            bleed_debug["trim_box_inches"] = {
+                "x1": trim_x1 / dpi,
+                "y1": trim_y1 / dpi,
+                "x2": trim_x2 / dpi,
+                "y2": trim_y2 / dpi,
+                "width": (trim_x2 - trim_x1) / dpi,
+                "height": (trim_y2 - trim_y1) / dpi
+            }
+            
             logger.info(
-                f"Added {bleed_px}px bleed. "
-                f"New size: {pil_image.width}x{pil_image.height}px, "
-                f"Trim box: ({trim_x1},{trim_y1})-({trim_x2},{trim_y2})"
+                f"Added {bleed_px}px ({bleed_mm}mm) bleed. "
+                f"Image: {current_w}x{current_h}px -> "
+                f"{pil_image.width}x{pil_image.height}px. "
+                f"Trim box: ({trim_x1},{trim_y1})-({trim_x2},{trim_y2})px"
             )
+        else:
+            bleed_debug["image_after_bleed"] = bleed_debug["image_before_bleed"]
+            bleed_debug["trim_box_pixels"] = {
+                "x1": 0, "y1": 0, "x2": current_w, "y2": current_h,
+                "note": "No bleed added"
+            }
         
         # Step 8: Upscale to final dimensions
         # Target includes bleed
@@ -891,6 +955,22 @@ async def process_for_print_endpoint(
             pil_image.width, pil_image.height
         )
         
+        upscale_debug = {
+            "step": "8_upscale",
+            "scale_factor": round(scale_factor, 3),
+            "target_with_bleed_px": {
+                "width": final_width_px,
+                "height": final_height_px
+            },
+            "image_before_upscale": {
+                "width_px": pil_image.width,
+                "height_px": pil_image.height
+            },
+            "trim_box_before_upscale_px": {
+                "x1": trim_x1, "y1": trim_y1, "x2": trim_x2, "y2": trim_y2
+            }
+        }
+        
         if scale_factor != 1.0:
             pil_image = upscale_with_LANCZOS(pil_image, scale_factor)
             # Update trim box coordinates
@@ -898,27 +978,202 @@ async def process_for_print_endpoint(
             trim_y1 = int(trim_y1 * scale_factor)
             trim_x2 = int(trim_x2 * scale_factor)
             trim_y2 = int(trim_y2 * scale_factor)
+            
+            upscale_debug["image_after_upscale"] = {
+                "width_px": pil_image.width,
+                "height_px": pil_image.height,
+                "width_inches": pil_image.width / dpi,
+                "height_inches": pil_image.height / dpi
+            }
+            upscale_debug["trim_box_after_upscale_px"] = {
+                "x1": trim_x1, "y1": trim_y1, "x2": trim_x2, "y2": trim_y2,
+                "width": trim_x2 - trim_x1,
+                "height": trim_y2 - trim_y1
+            }
+            upscale_debug["trim_box_after_upscale_inches"] = {
+                "x1": trim_x1 / dpi,
+                "y1": trim_y1 / dpi,
+                "x2": trim_x2 / dpi,
+                "y2": trim_y2 / dpi,
+                "width": (trim_x2 - trim_x1) / dpi,
+                "height": (trim_y2 - trim_y1) / dpi
+            }
+            
             logger.info(
-                f"Upscaled by {scale_factor:.3f}x to "
-                f"{pil_image.width}x{pil_image.height}px"
+                f"Upscaled by {scale_factor:.3f}x. "
+                f"Image: {upscale_debug['image_before_upscale']['width_px']}x"
+                f"{upscale_debug['image_before_upscale']['height_px']}px -> "
+                f"{pil_image.width}x{pil_image.height}px. "
+                f"Trim box: ({trim_x1},{trim_y1})-({trim_x2},{trim_y2})px"
             )
+        else:
+            upscale_debug["image_after_upscale"] = \
+                upscale_debug["image_before_upscale"]
+            upscale_debug["trim_box_after_upscale_px"] = \
+                upscale_debug["trim_box_before_upscale_px"]
         
         # Step 9: Convert to PDF
         pdf_doc = image_to_pdf_with_dimensions(pil_image, dpi)
         
         # Step 10: Add cutline at trim box
+        cutline_coords = None
+        cutline_debug = {
+            "step": "10_add_cutline",
+            "enabled": add_bleed
+        }
+        
         if add_bleed:
-            # Convert trim box to PDF points
+            # CRITICAL: The trim box coordinates are in SCALED pixels
+            # The image has been upscaled, so trim coordinates are also scaled
+            # We need to convert these scaled pixels to PDF points using the
+            # target DPI
+            
+            # Calculate PDF page dimensions (this determines physical size)
             width_pts = (pil_image.width / dpi) * 72
             height_pts = (pil_image.height / dpi) * 72
+            
+            cutline_debug["pdf_page_size_pts"] = {
+                "width": round(width_pts, 2),
+                "height": round(height_pts, 2)
+            }
+            cutline_debug["pdf_page_size_inches"] = {
+                "width": round(width_pts / 72, 4),
+                "height": round(height_pts / 72, 4)
+            }
+            
+            cutline_debug["scale_factor_applied"] = round(scale_factor, 3)
+            cutline_debug["note"] = (
+                "Trim box coordinates are in SCALED pixels. "
+                "They were multiplied by scale_factor during upscaling."
+            )
+            
+            # Convert trim box from SCALED pixels to PDF points
+            # Simple formula: (pixels / dpi) * 72
+            # NO DOUBLING - coordinates are already scaled correctly!
             trim_x1_pts = (trim_x1 / dpi) * 72
             trim_y1_pts = (trim_y1 / dpi) * 72
             trim_x2_pts = (trim_x2 / dpi) * 72
             trim_y2_pts = (trim_y2 / dpi) * 72
             
-            trim_rect = (trim_x1_pts, trim_y1_pts, trim_x2_pts, trim_y2_pts)
+            cutline_debug["conversion_formula"] = {
+                "description": "Simple conversion from scaled pixels to points",
+                "formula": "(pixels / dpi) * 72",
+                "x1": f"({trim_x1} / {dpi}) * 72 = {trim_x1_pts:.2f}",
+                "y1": f"({trim_y1} / {dpi}) * 72 = {trim_y1_pts:.2f}",
+                "x2": f"({trim_x2} / {dpi}) * 72 = {trim_x2_pts:.2f}",
+                "y2": f"({trim_y2} / {dpi}) * 72 = {trim_y2_pts:.2f}"
+            }
+            
+            cutline_debug["trim_box_before_y_flip_pts"] = {
+                "x1": round(trim_x1_pts, 2),
+                "y1": round(trim_y1_pts, 2),
+                "x2": round(trim_x2_pts, 2),
+                "y2": round(trim_y2_pts, 2),
+                "width": round(trim_x2_pts - trim_x1_pts, 2),
+                "height": round(trim_y2_pts - trim_y1_pts, 2)
+            }
+            
+            # Flip Y coordinates for PDF coordinate system (bottom-left origin)
+            trim_y1_pdf = height_pts - trim_y2_pts
+            trim_y2_pdf = height_pts - trim_y1_pts
+            
+            cutline_debug["y_flip_calculation"] = {
+                "formula": "y_flipped = page_height - y_original",
+                "y1_flipped": f"{height_pts:.2f} - {trim_y2_pts:.2f} = "
+                              f"{trim_y1_pdf:.2f}",
+                "y2_flipped": f"{height_pts:.2f} - {trim_y1_pts:.2f} = "
+                              f"{trim_y2_pdf:.2f}"
+            }
+            
+            cutline_debug["trim_box_after_y_flip_pts"] = {
+                "x1": round(trim_x1_pts, 2),
+                "y1": round(trim_y1_pdf, 2),
+                "x2": round(trim_x2_pts, 2),
+                "y2": round(trim_y2_pdf, 2),
+                "width": round(trim_x2_pts - trim_x1_pts, 2),
+                "height": round(trim_y2_pdf - trim_y1_pdf, 2)
+            }
+            
+            cutline_debug["trim_box_after_y_flip_inches"] = {
+                "x1": round(trim_x1_pts / 72, 4),
+                "y1": round(trim_y1_pdf / 72, 4),
+                "x2": round(trim_x2_pts / 72, 4),
+                "y2": round(trim_y2_pdf / 72, 4),
+                "width": round((trim_x2_pts - trim_x1_pts) / 72, 4),
+                "height": round((trim_y2_pdf - trim_y1_pdf) / 72, 4)
+            }
+            
+            cutline_debug["expected_bleed_distance"] = {
+                "mm": bleed_mm,
+                "inches": round(bleed_mm / 25.4, 4),
+                "points": round((bleed_mm / 25.4) * 72, 2),
+                "note": "Cutline should be at this distance from page edge"
+            }
+            
+            cutline_debug["actual_cutline_distance_from_edge"] = {
+                "left_pts": round(trim_x1_pts, 2),
+                "top_pts": round(trim_y1_pdf, 2),
+                "left_inches": round(trim_x1_pts / 72, 4),
+                "top_inches": round(trim_y1_pdf / 72, 4),
+                "left_mm": round((trim_x1_pts / 72) * 25.4, 2),
+                "top_mm": round((trim_y1_pdf / 72) * 25.4, 2)
+            }
+            
+            logger.info(
+                f"PDF conversion:\n"
+                f"  Page: {width_pts:.2f}x{height_pts:.2f}pts "
+                f"({width_pts/72:.4f}x{height_pts/72:.4f}in)\n"
+                f"  Trim box (pixels): ({trim_x1},{trim_y1})-"
+                f"({trim_x2},{trim_y2})\n"
+                f"  Trim box (points, before Y-flip): "
+                f"({trim_x1_pts:.2f},{trim_y1_pts:.2f})-"
+                f"({trim_x2_pts:.2f},{trim_y2_pts:.2f})\n"
+                f"  Trim box (points, after Y-flip): "
+                f"({trim_x1_pts:.2f},{trim_y1_pdf:.2f})-"
+                f"({trim_x2_pts:.2f},{trim_y2_pdf:.2f})\n"
+                f"  Expected bleed distance: {bleed_mm}mm = "
+                f"{(bleed_mm/25.4)*72:.2f}pts\n"
+                f"  Actual cutline distance from edge: "
+                f"{trim_x1_pts:.2f}pts = {(trim_x1_pts/72)*25.4:.2f}mm"
+            )
+            
+            trim_rect = (trim_x1_pts, trim_y1_pdf, trim_x2_pts, trim_y2_pdf)
             pdf_doc = add_cutline(pdf_doc, trim_rect, "CutContour")
-            logger.info(f"Added cutline at {trim_rect}")
+            
+            cutline_coords = {
+                "x1": round(trim_x1_pts, 2),
+                "y1": round(trim_y1_pdf, 2),
+                "x2": round(trim_x2_pts, 2),
+                "y2": round(trim_y2_pdf, 2),
+                "unit": "points"
+            }
+        else:
+            cutline_debug["reason_not_added"] = "Bleed not enabled"
+        
+        # Prepare comprehensive debug information
+        debug_info = {
+            "original_image": {
+                "width_px": actual_x_px,
+                "height_px": actual_y_px,
+                "aspect_ratio": round(actual_ratio, 3)
+            },
+            "target_dimensions": {
+                "width_px": desired_x_px,
+                "height_px": desired_y_px,
+                "aspect_ratio": round(desired_ratio, 3),
+                "dpi": dpi,
+                "width_inches": round(desired_x_px / dpi, 4),
+                "height_inches": round(desired_y_px / dpi, 4)
+            },
+            "strategy": strategy,
+            "scale_factor": round(scale_factor, 3),
+            "bleed_debug": bleed_debug,
+            "upscale_debug": upscale_debug,
+            "cutline_debug": cutline_debug,
+            "cutline_coordinates": cutline_coords
+        }
+        
+        logger.info(f"Debug info: {json.dumps(debug_info, indent=2)}")
         
         # Step 11: Return PDF
         pdf_bytes = pdf_doc.tobytes()
@@ -929,7 +1184,8 @@ async def process_for_print_endpoint(
             media_type="application/pdf",
             headers={
                 "Content-Disposition": \
-                    'attachment; filename="print_ready.pdf"'
+                    'attachment; filename="print_ready.pdf"',
+                "X-Debug-Info": json.dumps(debug_info)
             }
         )
         
