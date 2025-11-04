@@ -242,7 +242,7 @@ def ai_image_extension(
         f"overlap_h={overlap_horizontally}, overlap_v={overlap_vertically}"
     )
     
-    client = Client("https://ogff6k0h7xmm34-7860.proxy.runpod.net/")
+    client = Client("https://xlt1v9j4xoec1m-7860.proxy.runpod.net/")
     
     result = client.predict(
         image=handle_file(image_path),
@@ -2119,6 +2119,7 @@ async def process_for_print_step2_endpoint(
     dpi: int = Form(300),
     add_bleed: bool = Form(True),
     bleed_mm: float = Form(3.0),
+    add_cutline: bool = Form(False),
 ):
     """
     Step 2: Complete processing with selected AI extension result.
@@ -2126,7 +2127,7 @@ async def process_for_print_step2_endpoint(
     Takes the selected extended image and completes:
     - Add mirror bleed
     - Upscale to target DPI
-    - Convert to PDF with cutline
+    - Convert to PDF with cutline (if requested)
     """
     unit = unit.strip().lower()
     if unit == "mm":
@@ -2180,7 +2181,7 @@ async def process_for_print_step2_endpoint(
         # Step 10: Create PDF with cutline
         pdf_doc = image_to_pdf_with_dimensions(pil_image, dpi)
         
-        if add_bleed and bleed_mm > 0:
+        if add_cutline and add_bleed and bleed_mm > 0:
             # Calculate cutline position in points
             bleed_pts = (bleed_mm / 25.4) * 72
             page = pdf_doc[0]
@@ -2194,7 +2195,12 @@ async def process_for_print_step2_endpoint(
             pdf_doc = add_cutline(pdf_doc, cutline_rect)
             logger.info("Step 10: Added CutContour spot color cutline")
         else:
-            logger.info("Step 10: No cutline added (no bleed)")
+            if not add_cutline:
+                logger.info("Step 10: Cutline not requested")
+            elif not add_bleed or bleed_mm <= 0:
+                logger.info("Step 10: No cutline added (no bleed)")
+            else:
+                logger.info("Step 10: No cutline added")
         
         pdf_bytes = pdf_doc.tobytes()
         

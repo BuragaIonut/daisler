@@ -40,6 +40,7 @@ export default function Home() {
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
   const [bleedSize, setBleedSize] = useState<string>("3");
+  const [addCutline, setAddCutline] = useState<boolean>(false);
   const [processingForPrint, setProcessingForPrint] = useState(false);
   
   // AI Extension selection state
@@ -52,7 +53,9 @@ export default function Home() {
   const [selectedOptionIndex, setSelectedOptionIndex] = useState<number>(0);
   const [showingOptions, setShowingOptions] = useState(false);
   const [loadingExtensions, setLoadingExtensions] = useState(false);
-  const [expectedExtensions, setExpectedExtensions] = useState(0);
+  const [currentGeneratingIndex, setCurrentGeneratingIndex] = useState<number>(-1);
+  const [availableOverlaps, setAvailableOverlaps] = useState<number[]>([]);
+  const [aiExtensionParams, setAiExtensionParams] = useState<any>(null);
   const [expandedCardIndex, setExpandedCardIndex] = useState<number | null>(null);
   const [fullscreenCardIndex, setFullscreenCardIndex] = useState<number | null>(null);
   
@@ -504,6 +507,112 @@ export default function Home() {
     }
   };
 
+  const generateNextExtension = async (index: number, strategyData: any, inputFile: File) => {
+    if (!strategyData || !inputFile) return;
+    
+    setCurrentGeneratingIndex(index);
+    setLoadingExtensions(true);
+    
+    try {
+      if (strategyData.status === "needs_two_step_extension") {
+        // Two-step strategy
+        const step1Params = strategyData.step1_params;
+        const step2Params = strategyData.step2_params;
+        const overlapPct = step2Params.overlap_percentages[index];
+        
+        console.log(`Two-step generation for ${overlapPct}%: Step 1 - Converting to square...`);
+        
+        // Step 1: Convert to square
+        const step1Form = new FormData();
+        step1Form.append("file", inputFile);
+        step1Form.append("target_width", String(step1Params.target_width));
+        step1Form.append("target_height", String(step1Params.target_height));
+        step1Form.append("overlap_percentage", String(overlapPct));
+        step1Form.append("overlap_horizontally", String(step1Params.overlap_horizontally));
+        step1Form.append("overlap_vertically", String(step1Params.overlap_vertically));
+        
+        const step1Res = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
+          method: "POST",
+          body: step1Form
+        });
+        
+        if (!step1Res.ok) {
+          const errorText = await step1Res.text();
+          throw new Error(`Step1 AI extension failed for ${overlapPct}%: ${errorText}`);
+        }
+        
+        const step1Data = await step1Res.json();
+        console.log(`✓ Step1 complete: square with ${overlapPct}% overlap`);
+        
+        // Step 2: Convert square to final ratio
+        console.log(`Step 2 - Converting to final dimensions...`);
+        const step1ImageBlob = await fetch(step1Data.extended_image).then(r => r.blob());
+        const step1File = new File([step1ImageBlob], `square_${overlapPct}.png`, { type: "image/png" });
+        
+        const step2Form = new FormData();
+        step2Form.append("file", step1File);
+        step2Form.append("target_width", String(step2Params.target_width));
+        step2Form.append("target_height", String(step2Params.target_height));
+        step2Form.append("overlap_percentage", String(overlapPct));
+        step2Form.append("overlap_horizontally", String(step2Params.overlap_horizontally));
+        step2Form.append("overlap_vertically", String(step2Params.overlap_vertically));
+        
+        const step2Res = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
+          method: "POST",
+          body: step2Form
+        });
+        
+        if (!step2Res.ok) {
+          const errorText = await step2Res.text();
+          throw new Error(`Step2 AI extension failed for ${overlapPct}%: ${errorText}`);
+        }
+        
+        const step2Data = await step2Res.json();
+        console.log(`✓ Step2 complete: final with ${overlapPct}% overlap`);
+        
+        // Add the final result
+        setExtensionOptions(prev => [...prev, step2Data]);
+        
+      } else {
+        // Single-step strategy
+        const aiParams = strategyData.ai_extension_params;
+        const overlapPct = aiParams.overlap_percentages[index];
+        
+        console.log(`Generating AI extension for ${overlapPct}% overlap...`);
+        
+        const aiForm = new FormData();
+        aiForm.append("file", inputFile);
+        aiForm.append("target_width", String(aiParams.target_width));
+        aiForm.append("target_height", String(aiParams.target_height));
+        aiForm.append("overlap_percentage", String(overlapPct));
+        aiForm.append("overlap_horizontally", String(aiParams.overlap_horizontally));
+        aiForm.append("overlap_vertically", String(aiParams.overlap_vertically));
+        
+        const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
+          method: "POST",
+          body: aiForm
+        });
+        
+        if (!aiRes.ok) {
+          const errorText = await aiRes.text();
+          throw new Error(`AI extension failed for ${overlapPct}%: ${errorText}`);
+        }
+        
+        const aiData = await aiRes.json();
+        console.log(`✓ AI extension complete for ${overlapPct}% overlap`);
+        
+        // Add result
+        setExtensionOptions(prev => [...prev, aiData]);
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Extension generation error";
+      setError(message);
+    } finally {
+      setLoadingExtensions(false);
+      setCurrentGeneratingIndex(-1);
+    }
+  };
+
   const onProcess = async () => {
     setError(null);
     setProcessedUrl(null);
@@ -735,10 +844,11 @@ export default function Home() {
         return;
       }
       
-      // Reset and prepare for progressive loading
+      // Reset and prepare for sequential loading
       setExtensionOptions([]);
       setShowingOptions(true);
-      setLoadingExtensions(true);
+      setLoadingExtensions(false);
+      setCurrentGeneratingIndex(-1);
       
       // Scroll to AI Extension section after a short delay to let it render
       setTimeout(() => {
@@ -748,197 +858,31 @@ export default function Home() {
         });
       }, 100);
       
-      // Check if this is a two-step strategy
+      // Store AI extension params for sequential generation
       if (data.status === "needs_two_step_extension") {
-        console.log("Two-step AI extension required:", data.strategy);
-        
-        const step1Params = data.step1_params;
-        const step2Params = data.step2_params;
-        
-        // Total extensions: 4 for step1 + 4 for step2 = 8, but only show final 4
-        setExpectedExtensions(step2Params.overlap_percentages.length);
-        
-        // Step 1: Convert to square (4 variants)
-        console.log("Phase 1: Converting to square...");
-        const step1Promises = step1Params.overlap_percentages.map(
-          async (overlapPct: number) => {
-            const aiForm = new FormData();
-            aiForm.append("file", fileToSend);
-            aiForm.append("target_width", String(step1Params.target_width));
-            aiForm.append("target_height", String(step1Params.target_height));
-            aiForm.append("overlap_percentage", String(overlapPct));
-            aiForm.append(
-              "overlap_horizontally",
-              String(step1Params.overlap_horizontally)
-            );
-            aiForm.append(
-              "overlap_vertically",
-              String(step1Params.overlap_vertically)
-            );
-            
-            console.log(
-              `Step1: AI extension to square with ${overlapPct}% overlap...`
-            );
-            
-            const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
-              method: "POST",
-              body: aiForm
-            });
-            
-            if (!aiRes.ok) {
-              const errorText = await aiRes.text();
-              throw new Error(
-                `Step1 AI extension failed for ${overlapPct}%: ${errorText}`
-              );
-            }
-            
-            const aiData = await aiRes.json();
-            console.log(
-              `✓ Step1 complete: square with ${overlapPct}% overlap`
-            );
-            return aiData;
-          }
-        );
-        
-        // Wait for all step1 to complete
-        const step1Results = await Promise.all(step1Promises);
-        console.log(
-          `Phase 1 complete: ${step1Results.length} square variants created`
-        );
-        
-        // Step 2: Convert each square to final ratio (4 variants)
-        console.log("Phase 2: Converting to final dimensions...");
-        const step2Promises = step1Results.map(
-          async (step1Result, index) => {
-            const overlapPct = step2Params.overlap_percentages[index];
-            
-            // Create a blob from step1 extended image to use as input for step2
-            const step1ImageBlob = await fetch(
-              step1Result.extended_image
-            ).then(r => r.blob());
-            const step1File = new File(
-              [step1ImageBlob],
-              `square_${overlapPct}.png`,
-              { type: "image/png" }
-            );
-            
-            const aiForm = new FormData();
-            aiForm.append("file", step1File);
-            aiForm.append("target_width", String(step2Params.target_width));
-            aiForm.append("target_height", String(step2Params.target_height));
-            aiForm.append("overlap_percentage", String(overlapPct));
-            aiForm.append(
-              "overlap_horizontally",
-              String(step2Params.overlap_horizontally)
-            );
-            aiForm.append(
-              "overlap_vertically",
-              String(step2Params.overlap_vertically)
-            );
-            
-            console.log(
-              `Step2: AI extension to final with ${overlapPct}% overlap...`
-            );
-            
-            const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
-              method: "POST",
-              body: aiForm
-            });
-            
-            if (!aiRes.ok) {
-              const errorText = await aiRes.text();
-              throw new Error(
-                `Step2 AI extension failed for ${overlapPct}%: ${errorText}`
-              );
-            }
-            
-            const aiData = await aiRes.json();
-            console.log(
-              `✓ Step2 complete: final with ${overlapPct}% overlap`
-            );
-            
-            // Add result immediately (progressive display)
-            setExtensionOptions(prev => {
-              const newOptions = [...prev, aiData];
-              return newOptions.sort(
-                (a, b) => a.overlap_percentage - b.overlap_percentage
-              );
-            });
-            
-            return aiData;
-          }
-        );
-        
-        // Wait for all step2 to complete
-        await Promise.all(step2Promises);
-        console.log(
-          `Phase 2 complete: ${step2Params.overlap_percentages.length} final variants`
-        );
-        
+        // For two-step, we'll handle it differently
+        setAiExtensionParams({
+          isTwoStep: true,
+          step1Params: data.step1_params,
+          step2Params: data.step2_params,
+          fileToSend: fileToSend,
+          strategy: data.strategy
+        });
+        setAvailableOverlaps(data.step2_params.overlap_percentages);
       } else {
         // Single-step strategy
-        const aiParams = data.ai_extension_params;
-        console.log("Single-step AI extension parameters:", aiParams);
-        
-        setExpectedExtensions(aiParams.overlap_percentages.length);
-        
-        // Call all AI extensions but display results as they arrive
-        const promises = aiParams.overlap_percentages.map(
-          async (overlapPct: number) => {
-            const aiForm = new FormData();
-            aiForm.append("file", fileToSend);
-            aiForm.append("target_width", String(aiParams.target_width));
-            aiForm.append("target_height", String(aiParams.target_height));
-            aiForm.append("overlap_percentage", String(overlapPct));
-            aiForm.append(
-              "overlap_horizontally",
-              String(aiParams.overlap_horizontally)
-            );
-            aiForm.append(
-              "overlap_vertically",
-              String(aiParams.overlap_vertically)
-            );
-            
-            console.log(`Calling AI extension for ${overlapPct}% overlap...`);
-            
-            const aiRes = await fetch(`${BACKEND_URL}/ai_extend_with_mask`, {
-              method: "POST",
-              body: aiForm
-            });
-            
-            if (!aiRes.ok) {
-              const errorText = await aiRes.text();
-              throw new Error(
-                `AI extension failed for ${overlapPct}%: ${errorText}`
-              );
-            }
-            
-            const aiData = await aiRes.json();
-            console.log(`✓ AI extension complete for ${overlapPct}% overlap`);
-            
-            // Add result immediately as it arrives (progressive display)
-            setExtensionOptions(prev => {
-              const newOptions = [...prev, aiData];
-              // Sort by overlap percentage to keep consistent order
-              return newOptions.sort(
-                (a, b) => a.overlap_percentage - b.overlap_percentage
-              );
-            });
-            
-            return aiData;
-          }
-        );
-        
-        // Wait for all to complete
-        await Promise.all(promises);
-        console.log(
-          `All ${aiParams.overlap_percentages.length} AI extensions complete`
-        );
+        setAiExtensionParams({
+          isTwoStep: false,
+          ...data.ai_extension_params,
+          fileToSend: fileToSend
+        });
+        setAvailableOverlaps(data.ai_extension_params.overlap_percentages);
       }
       
-      // All done, stop loading spinner
-      setLoadingExtensions(false);
-      setSelectedOptionIndex(2); // Default to 10% overlap (index 2)
+      // Automatically generate the first option (3%)
+      await generateNextExtension(0, data, fileToSend);
+      
+      setSelectedOptionIndex(0);
       setError(null);
       
     } catch (err: unknown) {
@@ -976,6 +920,7 @@ export default function Home() {
       const bleedValueToSend = parseFloat(bleedSize) || 0;
       form.append("add_bleed", String(bleedValueToSend > 0));
       form.append("bleed_mm", bleedSize);
+      form.append("add_cutline", String(addCutline));
 
       const res = await fetch(`${BACKEND_URL}/process_for_print_step2`, {
         method: "POST",
@@ -1081,6 +1026,17 @@ export default function Home() {
               <option value="5">5mm</option>
               <option value="10">10mm</option>
             </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium flex items-center gap-2 cursor-pointer">
+              <input 
+                type="checkbox" 
+                checked={addCutline}
+                onChange={(e) => setAddCutline(e.target.checked)}
+                className="w-4 h-4 text-[var(--accent)] bg-gray-100 border-gray-300 rounded focus:ring-[var(--accent)] focus:ring-2"
+              />
+              <span>Cutline</span>
+            </label>
           </div>
         </div>
       </header>
@@ -1716,7 +1672,7 @@ export default function Home() {
             </p>
             
             {/* Progressive Loading Info */}
-            {loadingExtensions && (
+            {loadingExtensions && currentGeneratingIndex >= 0 && (
               <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg flex items-center gap-3">
                 <svg className="animate-spin h-6 w-6 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -1724,10 +1680,10 @@ export default function Home() {
                 </svg>
                 <div>
                   <div className="font-medium text-blue-300">
-                    Se generează variantele AI... ({extensionOptions.length}/{expectedExtensions})
+                    Se generează varianta {availableOverlaps[currentGeneratingIndex]}%...
                   </div>
                   <div className="text-sm text-blue-400 mt-1">
-                    Rezultatele apar pe măsură ce sunt finalizate
+                    Vă rugăm așteptați
                   </div>
                 </div>
               </div>
@@ -1879,28 +1835,73 @@ export default function Home() {
                             </div>
                           </>
                         ) : (
-                          /* Placeholder Loading State */
+                          /* Placeholder - Not Generated Yet */
                           <div className="w-full h-full flex flex-col items-center justify-center p-6">
-                            {/* Placeholder card structure */}
                             <div className="flex flex-col items-center gap-4">
-                              {/* Spinner */}
-                              <svg className="animate-spin h-16 w-16 text-[var(--accent)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                              </svg>
-                              
-                              {/* Loading text */}
-                              <div className="text-center space-y-2">
-                                <div className="text-base font-medium text-[var(--accent)]">
-                                  Se generează...
-                                </div>
-                                <div className="text-sm text-[var(--accent)]/80">
-                                  Overlap {overlapPct}%
-                                </div>
-                              </div>
-                              
-                              {/* Skeleton placeholder for image area */}
-                              <div className="w-32 h-32 bg-white/5 rounded-lg animate-pulse"></div>
+                              {/* Show spinner if currently generating */}
+                              {currentGeneratingIndex === index ? (
+                                <>
+                                  <svg className="animate-spin h-16 w-16 text-[var(--accent)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                  </svg>
+                                  <div className="text-center space-y-2">
+                                    <div className="text-base font-medium text-[var(--accent)]">
+                                      Se generează...
+                                    </div>
+                                    <div className="text-sm text-[var(--accent)]/80">
+                                      Overlap {overlapPct}%
+                                    </div>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  {/* Generate Next Button */}
+                                  <div className="text-center space-y-4">
+                                    <div className="text-lg font-medium text-white/70">
+                                      Overlap {overlapPct}%
+                                    </div>
+                                    <div className="text-sm text-white/50 mb-4">
+                                      Nu a fost încă generat
+                                    </div>
+                                    {/* Only show button if previous options are generated or if it's the first */}
+                                    {(index === 0 || extensionOptions.length >= index) && !loadingExtensions && aiExtensionParams && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          generateNextExtension(
+                                            index,
+                                            aiExtensionParams.isTwoStep 
+                                              ? {
+                                                  status: "needs_two_step_extension",
+                                                  step1_params: aiExtensionParams.step1Params,
+                                                  step2_params: aiExtensionParams.step2Params,
+                                                  strategy: aiExtensionParams.strategy
+                                                }
+                                              : {
+                                                  ai_extension_params: {
+                                                    ...aiExtensionParams,
+                                                    overlap_percentages: availableOverlaps
+                                                  }
+                                                },
+                                            aiExtensionParams.fileToSend
+                                          );
+                                        }}
+                                        className="px-6 py-3 rounded-lg font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
+                                      >
+                                        Generează varianta {overlapPct}%
+                                      </button>
+                                    )}
+                                    {index > 0 && extensionOptions.length < index && (
+                                      <div className="text-xs text-white/40">
+                                        Generează mai întâi variantele anterioare
+                                      </div>
+                                    )}
+                                  </div>
+                                  {/* Skeleton placeholder */}
+                                  <div className="w-32 h-32 bg-white/5 rounded-lg"></div>
+                                </>
+                              )}
                             </div>
                           </div>
                         )}
