@@ -270,7 +270,7 @@ def ai_image_extension(
         f"overlap_h={overlap_horizontally}, overlap_v={overlap_vertically}"
     )
     
-    client = Client("https://aa4odb0o6yoqu7-7860.proxy.runpod.net/")
+    client = Client("https://6o4c9k5qwfwtgx-7860.proxy.runpod.net/")
     
     result = client.predict(
         image=handle_file(image_path),
