@@ -72,25 +72,53 @@ if _k:
 # ============================================================================
 
 def calculate_desired_bleed_in_pixels(
-    bleed_inch: float, 
+    bleed_mm: float, 
     desired_ppi: float
 ) -> int:
-    """Calculate bleed in pixels from inches and PPI."""
+    """Calculate bleed in pixels from millimeters and PPI."""
+    bleed_inch = bleed_mm / 25.4
     bleed_px = int(bleed_inch * desired_ppi)
     return bleed_px
 
 
 def calculate_desired_pixels(
-    desired_x_inch: float, 
-    desired_y_inch: float, 
+    desired_x_mm: float, 
+    desired_y_mm: float, 
     desired_ppi: float
 ) -> tuple[int, int, float]:
     """Calculate desired dimensions in pixels and aspect ratio."""
-    desired_x_px = int(desired_x_inch * desired_ppi)
-    desired_y_px = int(desired_y_inch * desired_ppi)
+    desired_x_px = int((desired_x_mm / 25.4) * desired_ppi)
+    desired_y_px = int((desired_y_mm / 25.4) * desired_ppi)
     desired_ratio = desired_x_px / desired_y_px
     return desired_x_px, desired_y_px, desired_ratio
 
+
+def mm_to_pixels(x_mm, y_mm, dpi):
+    """
+    Calculates the number of pixels for given dimensions in millimeters (mm)
+    and a specific resolution in Dots Per Inch (DPI).
+
+    Args:
+        x_mm (float): The width in millimeters.
+        y_mm (float): The height in millimeters.
+        dpi (int): The resolution in Dots Per Inch.
+
+    Returns:
+        tuple: A tuple (x_pixels, y_pixels) representing the needed pixels.
+    """
+    # 1 inch = 25.4 millimeters
+    MM_PER_INCH = 25.4
+
+    # Calculate inches: distance_in_inches = distance_in_mm / 25.4
+    x_inches = x_mm / MM_PER_INCH
+    y_inches = y_mm / MM_PER_INCH
+
+    # Calculate pixels: distance_in_pixels = distance_in_inches * dpi
+    x_pixels = x_inches * dpi
+    y_pixels = y_inches * dpi
+    ratio = x_pixels / y_pixels
+    # Return the results, often rounded to the nearest integer for practical pixel use
+    return round(x_pixels), round(y_pixels), ratio
 
 def image_to_CMYK(image: Image.Image) -> Image.Image:
     """Convert an image to CMYK color space."""
@@ -220,8 +248,8 @@ def determine_extension_strategy(
 
 def ai_image_extension(
     image_path: str, 
-    target_width: int, 
-    target_height: int, 
+    target_width_mm: int, 
+    target_height_mm: int, 
     overlap_horizontally: bool, 
     overlap_vertically: bool, 
     overlap_percentage: int
@@ -238,16 +266,16 @@ def ai_image_extension(
         overlap_left = overlap_right = True
     
     logger.info(
-        f"AI Extension: target={target_width}x{target_height}, "
+        f"AI Extension: target={target_width_mm}x{target_height_mm}, "
         f"overlap_h={overlap_horizontally}, overlap_v={overlap_vertically}"
     )
     
-    client = Client("https://xlt1v9j4xoec1m-7860.proxy.runpod.net/")
+    client = Client("https://aa4odb0o6yoqu7-7860.proxy.runpod.net/")
     
     result = client.predict(
         image=handle_file(image_path),
-        width=target_width,
-        height=target_height,
+        width=target_width_mm,
+        height=target_height_mm,
         overlap_percentage=overlap_percentage,
         num_inference_steps=num_inference_steps,
         resize_option="Full",
@@ -1289,357 +1317,6 @@ async def analyze_endpoint(
     return AnalysisResponse(result=result_text)
 
 
-@app.post(f"{prefix}/remove_background")
-async def remove_background_endpoint(file: UploadFile = File(None)):
-    # Placeholder endpoint – to be implemented
-    return {"message": "Will be implemented soon"}
-
-
-
-
-@app.post(f"{prefix}/resize")
-async def resize_image_endpoint(
-    file: UploadFile = File(...),
-    width: float = Form(...),
-    height: float = Form(...),
-    dpi: int = Form(...),
-    unit: str = Form("mm"),
-):
-    """Resize an image to target physical dimensions at a given DPI.
-
-    - width/height: physical size (in mm or inch based on `unit`)
-    - dpi: dots per inch
-    Returns PNG image of computed pixel size.
-    """
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-
-    if width <= 0 or height <= 0 or dpi <= 0:
-        raise HTTPException(status_code=400, detail="width, height and dpi must be positive")
-
-    try:
-        raw = await file.read()
-        pil = Image.open(BytesIO(raw)).convert("RGB")
-        u = (unit or "mm").strip().lower()
-        if u not in ("mm", "inch", "in", "inches"):
-            raise HTTPException(status_code=400, detail="unit must be mm or inch")
-        if u == "mm":
-            width_in = width / 25.4
-            height_in = height / 25.4
-        else:
-            width_in = width
-            height_in = height
-
-        target_w = max(1, int(round(width_in * dpi)))
-        target_h = max(1, int(round(height_in * dpi)))
-
-        resized = pil.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        buf = BytesIO()
-        resized.save(buf, format="PNG")
-        return Response(content=buf.getvalue(), media_type="image/png")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("resize failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.post(f"{prefix}/extend_image")
-async def extend_image_endpoint(
-    file: UploadFile = File(...),
-    target_width: int = Form(...),
-    target_height: int = Form(...),
-    prompt: str = Form("seamless continuation"),
-    overlap_percentage: int = Form(50),
-    num_inference_steps: int = Form(20),
-):
-    """
-    Extend an image using AI to reach target dimensions.
-    Useful when aspect ratio conversion is needed (landscape to portrait or vice versa).
-    
-    Args:
-        file: Image file to extend (jpeg/png)
-        target_width: Target width in pixels
-        target_height: Target height in pixels
-        prompt: Description to guide AI extension (default: "high quality, professional, seamless")
-        overlap_percentage: How much to overlap when extending (default: 50, range: 10-90)
-        num_inference_steps: Quality of AI generation (default: 20, higher = better quality but slower)
-        
-    Returns:
-        Extended image as PNG
-    """
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-        raise HTTPException(status_code=400, detail="Unsupported file type; expected image/jpeg or image/png")
-
-    if target_width <= 0 or target_height <= 0:
-        raise HTTPException(status_code=400, detail="Target dimensions must be positive")
-    
-    if overlap_percentage < 10 or overlap_percentage > 90:
-        raise HTTPException(status_code=400, detail="Overlap percentage must be between 10 and 90")
-    
-    if num_inference_steps < 1 or num_inference_steps > 50:
-        raise HTTPException(status_code=400, detail="Number of inference steps must be between 1 and 50")
-
-    try:
-        raw = await file.read()
-        pil_image = Image.open(BytesIO(raw)).convert("RGB")
-        
-        current_w, current_h = pil_image.size
-        current_ratio = current_w / current_h
-        target_ratio = target_width / target_height
-        
-        logger.info(f"Extending image from {current_w}x{current_h}px (ratio {current_ratio:.2f}) to {target_width}x{target_height}px (ratio {target_ratio:.2f})")
-        
-        # Check if extension is actually needed
-        ratio_difference = abs(current_ratio - target_ratio)
-        if ratio_difference < 0.05:  # Less than 5% difference
-            logger.info("Aspect ratios are very similar. Just resizing without AI extension.")
-            resized = pil_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
-            buf = BytesIO()
-            resized.save(buf, format="PNG")
-            return Response(content=buf.getvalue(), media_type="image/png")
-        
-        # Save to temp file for Gradio client
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            pil_image.save(tmp, format="PNG")
-            temp_input_path = tmp.name
-        
-        try:
-            # Determine which sides to extend
-            # Only use relevant overlaps: horizontal OR vertical, not both
-            alignment = "Middle"
-            
-            if current_ratio < target_ratio:
-                # Need to extend width (portrait → landscape or square → landscape)
-                # Horizontal extension only
-                overlap_left = True
-                overlap_right = True
-                overlap_top = False
-                overlap_bottom = False
-                logger.info("Extending horizontally (left and right only)")
-            elif current_ratio > target_ratio:
-                # Need to extend height (landscape → portrait or square → portrait)
-                # Vertical extension only
-                overlap_left = False
-                overlap_right = False
-                overlap_top = True
-                overlap_bottom = True
-                logger.info("Extending vertically (top and bottom only)")
-            else:
-                # Same ratio, shouldn't reach here due to earlier check
-                overlap_left = False
-                overlap_right = False
-                overlap_top = False
-                overlap_bottom = False
-            
-            # Connect to AI service
-            logger.info("Connecting to AI image extension service...")
-            client = Client("https://4udlwa02add62f-7860.proxy.runpod.net/")
-            
-            logger.info(f"Starting AI extension with prompt: '{prompt}'")
-            result = client.predict(
-                image=handle_file(temp_input_path),
-                width=target_width,
-                height=target_height,
-                overlap_percentage=overlap_percentage,
-                num_inference_steps=num_inference_steps,
-                resize_option="Full",
-                custom_resize_percentage=100,
-                prompt_input=prompt,
-                alignment=alignment,
-                overlap_left=overlap_left,
-                overlap_right=overlap_right,
-                overlap_top=overlap_top,
-                overlap_bottom=overlap_bottom,
-                api_name="/infer"
-            )
-            
-            # Result is tuple of (cnet_image, generated_image)
-            if isinstance(result, (list, tuple)) and len(result) >= 2:
-                extended_image_path = result[1]  # The final generated image
-                logger.info(f"AI extension completed: {extended_image_path}")
-                
-                # Load and return the extended image
-                extended_image = Image.open(extended_image_path).convert("RGB")
-                buf = BytesIO()
-                extended_image.save(buf, format="PNG")
-                
-                return Response(content=buf.getvalue(), media_type="image/png")
-            else:
-                logger.warning(f"Unexpected result format from AI service: {type(result)}")
-                raise HTTPException(status_code=500, detail="Unexpected response from AI service")
-                
-        finally:
-            # Clean up temp input file
-            if os.path.exists(temp_input_path):
-                os.unlink(temp_input_path)
-        
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("AI image extension failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"AI extension error: {str(exc)}")
-
-
-@app.post(f"{prefix}/add_bleed")
-async def add_bleed_endpoint(
-    file: UploadFile = File(...),
-    bleed_mm: float = Form(3.0),
-    dpi: int = Form(300),
-):
-    """
-    Add mirror bleed to an image.
-    
-    Args:
-        file: Image file (jpeg/png)
-        bleed_mm: Bleed size in millimeters (default: 3.0)
-        dpi: DPI to calculate pixel size (default: 300)
-        
-    Returns:
-        Image with bleed added as PNG
-    """
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-        raise HTTPException(status_code=400, detail="Unsupported file type; expected image/jpeg or image/png")
-
-    if bleed_mm < 0:
-        raise HTTPException(status_code=400, detail="Bleed must be non-negative")
-    
-    if dpi <= 0:
-        raise HTTPException(status_code=400, detail="DPI must be positive")
-
-    try:
-        raw = await file.read()
-        pil_image = Image.open(BytesIO(raw)).convert("RGB")
-        
-        logger.info(f"Adding {bleed_mm}mm bleed at {dpi} DPI to {pil_image.size[0]}x{pil_image.size[1]}px image")
-        
-        # Add mirror bleed
-        pil_image_with_bleed = add_mirror_bleed(pil_image, bleed_mm, dpi)
-        
-        logger.info(f"Bleed added. New size: {pil_image_with_bleed.size[0]}x{pil_image_with_bleed.size[1]}px")
-        
-        # Return as PNG
-        buf = BytesIO()
-        pil_image_with_bleed.save(buf, format="PNG")
-        return Response(content=buf.getvalue(), media_type="image/png")
-        
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Add bleed failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Add bleed error: {str(exc)}")
-
-
-@app.post(f"{prefix}/upscale_to_dpi")
-async def upscale_to_dpi_endpoint(
-    file: UploadFile = File(...),
-    target_width: float = Form(...),
-    target_height: float = Form(...),
-    unit: str = Form("mm"),
-    dpi: int = Form(300),
-):
-    """
-    Upscale image to exact dimensions at target DPI.
-    
-    Args:
-        file: Image file (jpeg/png)
-        target_width: Target width in mm or inches
-        target_height: Target height in mm or inches
-        unit: "mm" or "inch" (default: mm)
-        dpi: Target DPI (default: 300)
-        
-    Returns:
-        Upscaled image as PNG
-    """
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-        raise HTTPException(status_code=400, detail="Unsupported file type; expected image/jpeg or image/png")
-
-    if target_width <= 0 or target_height <= 0:
-        raise HTTPException(status_code=400, detail="Dimensions must be positive")
-    
-    if dpi <= 0:
-        raise HTTPException(status_code=400, detail="DPI must be positive")
-    
-    unit = unit.strip().lower()
-    if unit not in ("mm", "inch", "in", "inches"):
-        raise HTTPException(status_code=400, detail="Unit must be mm or inch")
-
-    try:
-        raw = await file.read()
-        pil_image = Image.open(BytesIO(raw)).convert("RGB")
-        
-        # Convert to mm for consistency
-        if unit in ("inch", "in", "inches"):
-            target_width_mm = target_width * 25.4
-            target_height_mm = target_height * 25.4
-        else:
-            target_width_mm = target_width
-            target_height_mm = target_height
-        
-        logger.info(f"Upscaling from {pil_image.size[0]}x{pil_image.size[1]}px to {target_width_mm}x{target_height_mm}mm at {dpi} DPI")
-        
-        # Upscale to target DPI
-        upscaled_image = upscale_to_target_dpi(pil_image, target_width_mm, target_height_mm, dpi)
-        
-        logger.info(f"Upscaled to {upscaled_image.size[0]}x{upscaled_image.size[1]}px")
-        
-        # Return as PNG
-        buf = BytesIO()
-        upscaled_image.save(buf, format="PNG")
-        return Response(content=buf.getvalue(), media_type="image/png")
-        
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Upscale to DPI failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Upscale error: {str(exc)}")
-
-
-@app.post(f"{prefix}/add_cutline_to_pdf")
-async def add_cutline_to_pdf_endpoint(
-    file: UploadFile = File(...),
-    bleed_mm: float = Form(3.0),
-    dpi: int = Form(300),
-):
-    """
-    Convert image to PDF and add CutContour spot color cutline.
-    
-    Args:
-        file: Image file (jpeg/png) - should already have bleed added
-        bleed_mm: Bleed size in mm (for calculating cutline position, default: 3.0)
-        dpi: DPI for point conversion (default: 300)
-        
-    Returns:
-        PDF with CutContour spot color cutline
-    """
-    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-        raise HTTPException(status_code=400, detail="Unsupported file type; expected image/jpeg or image/png")
-
-    if bleed_mm < 0:
-        raise HTTPException(status_code=400, detail="Bleed must be non-negative")
-    
-    if dpi <= 0:
-        raise HTTPException(status_code=400, detail="DPI must be positive")
-
-    try:
-        raw = await file.read()
-        pil_image = Image.open(BytesIO(raw)).convert("RGB")
-        
-        logger.info(f"Converting {pil_image.size[0]}x{pil_image.size[1]}px image to PDF with cutline at {bleed_mm}mm bleed")
-        
-        # Convert to PDF with cutline
-        pdf_bytes = image_to_pdf_with_cutline(pil_image, bleed_mm, dpi)
-        
-        logger.info("PDF with CutContour cutline generated successfully")
-        
-        return Response(content=pdf_bytes, media_type="application/pdf")
-        
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Add cutline to PDF failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Add cutline error: {str(exc)}")
-
 
 @app.post(f"{prefix}/pdf_to_image")
 async def pdf_to_image_endpoint(
@@ -1691,35 +1368,308 @@ async def image_to_pdf_endpoint(
     except Exception as exc:
         logger.exception("image_to_pdf failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
-    
-    
 
-@app.post(f"{prefix}/read_pdf_with_fitz")
-async def read_pdf_with_fitz_endpoint(
+
+@app.post(f"{prefix}/test_add_bleed")
+async def test_add_bleed_endpoint(
     file: UploadFile = File(...),
+    bleed_mm: float = Form(3.0),
+    dpi: int = Form(300),
+    target_width_mm: float = Form(None),
+    target_height_mm: float = Form(None),
+    upscale: bool = Form(False),
 ):
-    """Read a PDF file using PyMuPDF and return it."""
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Unsupported file type; expected application/pdf")
+    """
+    TEST ENDPOINT: Add mirror bleed to an image and optionally upscale it.
     
-    raw = await file.read()
-    try:
-        read_pdf_with_fitz(raw)
-        return Response("Successfully read PDF with PyMuPDF")
-    except Exception as exc:
-        logger.exception("read_pdf_with_fitz failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    This endpoint is for testing bleed visualization and upscaling. It adds 
+    mirror bleed to the image, optionally upscales it to target dimensions,
+    and returns it as a PNG so you can visually inspect the bleed area.
     
-
-def read_pdf_with_fitz(bytes_data):
-    try:
-        pdf = fitz.open(stream=bytes_data, filetype="pdf")
+    Args:
+        file: Image file (jpeg/png) without bleed
+        bleed_mm: Bleed size in millimeters (default: 3.0)
+        dpi: DPI for calculating bleed in pixels (default: 300)
+        target_width_mm: Target width in mm for upscaling (optional)
+        target_height_mm: Target height in mm for upscaling (optional)
+        upscale: Whether to upscale to target dimensions (default: False)
         
-        return pdf
-    except Exception as exc:
-        logger.exception("read_pdf_with_fitz failed: %s", exc)
-        raise exc
+    Returns:
+        PNG image with bleed added (and optionally upscaled)
+        
+    Example usage:
+        1. Without upscaling:
+           Upload a 100x100px image with 3mm bleed at 300 DPI
+           Result will be ~135x135px (3mm = ~35px at 300 DPI on each side)
+        
+        2. With upscaling:
+           Upload a 100x100px image, add 3mm bleed, upscale to 210x297mm (A4)
+           Result will be final A4 size with bleed at 300 DPI
+    """
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(
+            status_code=400, 
+            detail="Only image files accepted (jpeg/png)"
+        )
 
+    if bleed_mm < 0:
+        raise HTTPException(status_code=400, detail="Bleed must be non-negative")
+    
+    if dpi <= 0:
+        raise HTTPException(status_code=400, detail="DPI must be positive")
+
+    try:
+        raw = await file.read()
+        pil_image = Image.open(BytesIO(raw)).convert("RGB")
+        
+        original_width, original_height = pil_image.size
+        logger.info(
+            f"TEST: Adding {bleed_mm}mm bleed at {dpi} DPI to "
+            f"{original_width}x{original_height}px image"
+        )
+        
+        # Calculate bleed in pixels
+        bleed_inch = bleed_mm / 25.4
+        bleed_px = calculate_desired_bleed_in_pixels(bleed_inch, dpi)
+        
+        logger.info(f"TEST: Bleed = {bleed_mm}mm = {bleed_inch:.4f}in = {bleed_px}px")
+        
+        # Add mirror bleed
+        pil_image_with_bleed, x1, y1, x2, y2 = add_desired_mirror_bleed(
+            pil_image, bleed_px
+        )
+        
+        new_width, new_height = pil_image_with_bleed.size
+        logger.info(
+            f"TEST: Bleed added. Size: {original_width}x{original_height}px -> "
+            f"{new_width}x{new_height}px"
+        )
+        logger.info(
+            f"TEST: Original image area (trim box): "
+            f"({x1}, {y1}) to ({x2}, {y2})"
+        )
+        
+        # Optional: Upscale to target dimensions
+        scaling_factor = 1.0
+        if upscale and target_width_mm and target_height_mm:
+            logger.info(
+                f"TEST: Upscaling to {target_width_mm}x{target_height_mm}mm "
+                f"at {dpi} DPI"
+            )
+            
+            # Calculate target dimensions in pixels (including bleed)
+            target_width_inch = target_width_mm / 25.4
+            target_height_inch = target_height_mm / 25.4
+            target_width_px = int(target_width_inch * dpi)
+            target_height_px = int(target_height_inch * dpi)
+            
+            logger.info(
+                f"TEST: Target size with bleed: {target_width_px}x{target_height_px}px"
+            )
+            
+            # Determine scaling factor
+            scaling_factor = determine_scaling_factor(
+                target_width_px, target_height_px,
+                new_width, new_height
+            )
+            
+            logger.info(f"TEST: Scaling factor: {scaling_factor:.4f}")
+            
+            if scaling_factor > 1.01:
+                # Upscale the image
+                pil_image_with_bleed = upscale_with_LANCZOS(
+                    pil_image_with_bleed, scaling_factor
+                )
+                
+                # Update trim box coordinates after scaling
+                x1 = int(x1 * scaling_factor)
+                y1 = int(y1 * scaling_factor)
+                x2 = int(x2 * scaling_factor)
+                y2 = int(y2 * scaling_factor)
+                
+                new_width, new_height = pil_image_with_bleed.size
+                logger.info(
+                    f"TEST: Upscaled to {new_width}x{new_height}px "
+                    f"(factor: {scaling_factor:.4f})"
+                )
+                logger.info(
+                    f"TEST: Scaled trim box: ({x1}, {y1}) to ({x2}, {y2})"
+                )
+            else:
+                logger.info("TEST: No upscaling needed (factor <= 1.01)")
+        
+        # Add visual markers to show the trim box (optional debug overlay)
+        # Draw red lines at the bleed boundary
+        draw = ImageDraw.Draw(pil_image_with_bleed)
+        
+        # Draw trim box rectangle in red
+        draw.rectangle(
+            [(x1, y1), (x2, y2)], 
+            outline=(255, 0, 0), 
+            width=max(2, int(2 * scaling_factor))  # Scale line width too
+        )
+        
+        logger.info("TEST: Added red trim box overlay for visualization")
+        
+        # Return as PNG
+        buf = BytesIO()
+        pil_image_with_bleed.save(buf, format="PNG")
+        
+        # Generate descriptive filename
+        if upscale and scaling_factor > 1.01:
+            filename = f"with_bleed_upscaled_{bleed_mm}mm_{dpi}dpi_{new_width}x{new_height}px.png"
+        else:
+            filename = f"with_bleed_{bleed_mm}mm_{dpi}dpi_{new_width}x{new_height}px.png"
+        
+        return Response(
+            content=buf.getvalue(), 
+            media_type="image/png",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Original-Size": f"{original_width}x{original_height}",
+                "X-New-Size": f"{new_width}x{new_height}",
+                "X-Bleed-MM": str(bleed_mm),
+                "X-Bleed-PX": str(bleed_px),
+                "X-Trim-Box": f"{x1},{y1},{x2},{y2}",
+                "X-Scaling-Factor": f"{scaling_factor:.4f}",
+                "X-Upscaled": str(upscale and scaling_factor > 1.01),
+                "X-DPI": str(dpi)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("TEST: Add bleed failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Add bleed error: {str(exc)}")
+
+
+@app.post(f"{prefix}/test_add_cutline")
+async def test_add_cutline_endpoint(
+    file: UploadFile = File(...),
+    bleed_mm: float = Form(3.0),
+    dpi: int = Form(300),
+):
+    """
+    TEST ENDPOINT: Add cutline to an image with bleed and return as PDF.
+    
+    This endpoint is for testing cutline positioning. It assumes the input
+    image already has bleed added. It converts the image to PDF and adds
+    a CutContour spot color cutline at the bleed boundary.
+    
+    IMPORTANT: The input image should already have bleed added! 
+    Use /test_add_bleed first to add bleed, then pass that result here.
+    
+    Args:
+        file: Image file (jpeg/png) WITH bleed already added
+        bleed_mm: Bleed size in millimeters that was added (default: 3.0)
+        dpi: DPI of the image (default: 300)
+        
+    Returns:
+        PDF with CutContour spot color cutline at the bleed boundary
+        
+    Example workflow:
+        1. POST image to /test_add_bleed -> get PNG with bleed
+        2. POST that PNG to /test_add_cutline -> get PDF with cutline
+        3. Open PDF in Adobe Acrobat/Illustrator to verify cutline position
+    """
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(
+            status_code=400, 
+            detail="Only image files accepted (jpeg/png)"
+        )
+
+    if bleed_mm < 0:
+        raise HTTPException(status_code=400, detail="Bleed must be non-negative")
+    
+    if dpi <= 0:
+        raise HTTPException(status_code=400, detail="DPI must be positive")
+
+    try:
+        raw = await file.read()
+        pil_image = Image.open(BytesIO(raw)).convert("RGB")
+        
+        img_width, img_height = pil_image.size
+        logger.info(
+            f"TEST: Adding cutline to {img_width}x{img_height}px image "
+            f"with {bleed_mm}mm bleed at {dpi} DPI"
+        )
+        
+        # Convert image to PDF
+        pdf_doc = image_to_pdf_with_dimensions(pil_image, dpi)
+        
+        # Get PDF page dimensions
+        page = pdf_doc[0]
+        page_width_pts = page.rect.width
+        page_height_pts = page.rect.height
+        
+        logger.info(
+            f"TEST: PDF page size: {page_width_pts:.2f}x{page_height_pts:.2f} pts "
+            f"({page_width_pts/72:.4f}x{page_height_pts/72:.4f} inches)"
+        )
+        
+        # Calculate cutline position (bleed distance from edge)
+        bleed_pts = (bleed_mm / 25.4) * 72
+        
+        logger.info(
+            f"TEST: Bleed = {bleed_mm}mm = {bleed_mm/25.4:.4f}in = "
+            f"{bleed_pts:.2f}pts"
+        )
+        
+        # Cutline rectangle (inside the bleed)
+        cutline_x1 = bleed_pts
+        cutline_y1 = bleed_pts
+        cutline_x2 = page_width_pts - bleed_pts
+        cutline_y2 = page_height_pts - bleed_pts
+        
+        cutline_rect = (cutline_x1, cutline_y1, cutline_x2, cutline_y2)
+        
+        logger.info(
+            f"TEST: Cutline rectangle (points): "
+            f"({cutline_x1:.2f}, {cutline_y1:.2f}) to "
+            f"({cutline_x2:.2f}, {cutline_y2:.2f})"
+        )
+        logger.info(
+            f"TEST: Cutline dimensions: "
+            f"{cutline_x2 - cutline_x1:.2f}x{cutline_y2 - cutline_y1:.2f} pts"
+        )
+        logger.info(
+            f"TEST: Distance from edge: "
+            f"left={cutline_x1:.2f}pts ({cutline_x1/72*25.4:.2f}mm), "
+            f"top={cutline_y1:.2f}pts ({cutline_y1/72*25.4:.2f}mm)"
+        )
+        
+        # Add CutContour spot color cutline
+        pdf_doc = add_cutline(pdf_doc, cutline_rect, "CutContour")
+        
+        logger.info("TEST: CutContour spot color cutline added successfully")
+        
+        # Get PDF bytes
+        pdf_bytes = pdf_doc.tobytes()
+        pdf_doc.close()
+        
+        # Generate descriptive filename
+        filename = f"with_cutline_{bleed_mm}mm_{dpi}dpi_{img_width}x{img_height}px.pdf"
+        
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Image-Size-PX": f"{img_width}x{img_height}",
+                "X-PDF-Size-PTS": f"{page_width_pts:.2f}x{page_height_pts:.2f}",
+                "X-Bleed-MM": str(bleed_mm),
+                "X-Bleed-PTS": f"{bleed_pts:.2f}",
+                "X-Cutline-Rect": f"{cutline_x1:.2f},{cutline_y1:.2f},{cutline_x2:.2f},{cutline_y2:.2f}",
+                "X-DPI": str(dpi)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("TEST: Add cutline failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Add cutline error: {str(exc)}") 
 
 def ai_extension_parallel_overlaps(
     image_path: str,
@@ -1930,8 +1880,8 @@ async def ai_extend_with_mask_endpoint(
 @app.post(f"{prefix}/process_for_print_step1")
 async def process_for_print_step1_endpoint(
     file: UploadFile = File(...),
-    target_width: float = Form(...),
-    target_height: float = Form(...),
+    target_width_mm: float = Form(...),
+    target_height_mm: float = Form(...),
     unit: str = Form("mm"),
     dpi: int = Form(300),
 ):
@@ -1950,20 +1900,17 @@ async def process_for_print_step1_endpoint(
         )
 
     # Validate inputs
-    if target_width <= 0 or target_height <= 0 or dpi <= 0:
+    if target_width_mm <= 0 or target_height_mm <= 0 or dpi <= 0:
         raise HTTPException(status_code=400, detail="Invalid dimensions/DPI")
     
     unit = unit.strip().lower()
-    if unit not in ("mm", "inch", "in", "inches"):
-        raise HTTPException(status_code=400, detail="Unit must be mm or inch")
+    if unit != "mm":
+        raise HTTPException(status_code=400, detail="Unit must be mm")
 
     # Convert to mm
     if unit == "mm":
-        target_width_mm = target_width
-        target_height_mm = target_height
-    else:
-        target_width_mm = target_width * 25.4
-        target_height_mm = target_height * 25.4
+        target_width_mm = target_width_mm
+        target_height_mm = target_height_mm
 
     raw = await file.read()
     
@@ -1971,15 +1918,37 @@ async def process_for_print_step1_endpoint(
         pil_image = Image.open(BytesIO(raw)).convert("RGB")
         actual_x_px, actual_y_px, current_ratio = \
             read_image_dimensions_and_ratio(pil_image)
-        
-        # Calculate desired dimensions
-        desired_x_inch = target_width_mm / 25.4
-        desired_y_inch = target_height_mm / 25.4
+        logger.info(
+            f"Image size: {actual_x_px}x{actual_y_px}px, "
+            f"Current ratio: {current_ratio:.4f}"
+        )
+        desired_x_mm = target_width_mm
+        desired_y_mm = target_height_mm
+
+        logger.info(
+            f"Desired size: {desired_x_mm}x{desired_y_mm}mm at {dpi} DPI"
+        )
+
+
         desired_x_px, desired_y_px, desired_ratio = \
-            calculate_desired_pixels(desired_x_inch, desired_y_inch, dpi)
-        
+            calculate_desired_pixels(desired_x_mm, desired_y_mm, dpi)
+
+
+        logger.info(
+            f"Desired size in pixels: {desired_x_px}x{desired_y_px}px, "
+            f"Desired ratio: {desired_ratio:.4f}"
+        )
+
+        scaling_factor = determine_scaling_factor(
+            desired_x_px, desired_y_px,
+            actual_x_px, actual_y_px
+        )
+
+        logger.info(f"Scaling factor: {scaling_factor:.4f}")
+
         # Determine extension strategy
         strategy = determine_extension_strategy(current_ratio, desired_ratio)
+
         logger.info(f"Strategy: {strategy}")
         
         # If no extension needed, return early
@@ -1989,9 +1958,35 @@ async def process_for_print_step1_endpoint(
                 "message": "Image already matches desired aspect ratio",
                 "strategy": strategy,
                 "current_ratio": current_ratio,
-                "desired_ratio": desired_ratio
+                "desired_ratio": desired_ratio,
+                "overlap_percentages": [3, 5, 10, 15]
             })
-        
+        elif strategy == "portrait_to_square":
+            return JSONResponse(content={
+                "status": "needs_extension",
+                "message": "Image is portrait and needs extension to square format",
+                "strategy": strategy,
+                "current_ratio": current_ratio,
+                "desired_ratio": desired_ratio,
+                "target_width": 1024,
+                "target_height": 1024,
+                "overlap_horizontally": True,
+                "overlap_vertically": False,
+                "overlap_percentages": [3, 5, 10, 15]
+            })
+        elif strategy == "landscape_to_square":
+            return JSONResponse(content={
+                "status": "needs_extension",
+                "message": "Image is landscape and needs extension to square format",
+                "strategy": strategy,
+                "current_ratio": current_ratio,
+                "desired_ratio": desired_ratio,
+                "target_width": 1024,
+                "target_height": 1024,
+                "overlap_horizontally": False,
+                "overlap_vertically": True,
+                "overlap_percentages": [3, 5, 10, 15]
+            })
         # Determine target dimensions and overlap directions for AI
         # Check if this is a two-step strategy
         is_two_step = strategy in [
@@ -2011,6 +2006,11 @@ async def process_for_print_step1_endpoint(
             
             # Step 2: Convert square to final ratio
             rec_x, rec_y = calculate_constrained_dimensions(desired_ratio)
+
+            logger.info(
+                f"Calculated constrained dimensions for step 2: {rec_x}x{rec_y}"
+            )
+
             if strategy == "portrait_to_square_to_landscape":
                 step2_params = (rec_x, rec_y, True, False)  # Extend horizontally
             else:  # landscape_to_square_to_portrait
@@ -2048,13 +2048,13 @@ async def process_for_print_step1_endpoint(
             })
         else:
             # Single-step strategy
-            recommended_x, recommended_y, overlap_h, overlap_v = \
+            recommended_x_px, recommended_y_px, overlap_h, overlap_v = \
                 _get_extension_params(strategy, desired_ratio)
             
             # Return parameters for frontend to call AI extension endpoint
             logger.info(
                 f"Returning AI extension parameters: "
-                f"{recommended_x}x{recommended_y}, "
+                f"{recommended_x_px}x{recommended_y_px}, "
                 f"overlap_h={overlap_h}, overlap_v={overlap_v}"
             )
             
@@ -2068,8 +2068,8 @@ async def process_for_print_step1_endpoint(
                     "height": desired_y_px
                 },
                 "ai_extension_params": {
-                    "target_width": recommended_x,
-                    "target_height": recommended_y,
+                    "target_width": recommended_x_px,
+                    "target_height": recommended_y_px,
                     "overlap_horizontally": overlap_h,
                     "overlap_vertically": overlap_v,
                     "overlap_percentages": [3, 5, 10, 15]
@@ -2080,6 +2080,105 @@ async def process_for_print_step1_endpoint(
         logger.exception("Step 1 failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
+@app.post(f"{prefix}/process_for_print_step2")
+async def process_for_print_step2_endpoint(
+    selected_image_path: str = Form(...),
+    target_width: float = Form(...),
+    target_height: float = Form(...),
+    unit: str = Form("mm"),
+    dpi: int = Form(300),
+    add_bleed: bool = Form(True),
+    bleed_mm: float = Form(3.0),
+    to_add_cutline: bool = Form(False),
+):
+    """
+    Step 2: Complete processing with selected AI extension result.
+    
+    Takes the selected extended image and completes:
+    - Add mirror bleed
+    - Upscale to target DPI
+    - Convert to PDF with cutline (if requested)
+    """
+    unit = unit.strip().lower()
+    target_width_mm = target_width
+    target_height_mm = target_height
+
+    try:
+        # Load the selected extended image
+        pil_image = Image.open(selected_image_path).convert("RGB")
+        
+        # Step 7: Add mirror bleed
+        if add_bleed and bleed_mm > 0:
+            bleed_px = calculate_desired_bleed_in_pixels(bleed_mm, dpi)
+            pil_image, x1, y1, x2, y2 = add_desired_mirror_bleed(
+                pil_image, bleed_px
+            )
+            logger.info(f"Step 7: Added {bleed_mm}mm bleed ({bleed_px}px)")
+            logger.info(f"Coordinates of original image area: ({x1}, {y1}) to ({x2}, {y2})")
+        else:
+            w, h = pil_image.size
+            x1, y1, x2, y2 = 0, 0, w, h
+            logger.info("Step 7: No bleed added")
+
+        # Step 8: Upscale to target dimensions at desired DPI
+        desired_x_px, desired_y_px, _ = calculate_desired_pixels(
+            target_width_mm, target_height_mm, dpi
+        )
+        
+        actual_x_px, actual_y_px, _ = read_image_dimensions_and_ratio(
+            pil_image
+        )
+        scaling_factor = determine_scaling_factor(
+            desired_x_px, desired_y_px, actual_x_px, actual_y_px
+        )
+        
+        if scaling_factor > 1.01:
+            pil_image = upscale_with_LANCZOS(pil_image, scaling_factor)
+            logger.info(f"Step 8: Upscaled by {scaling_factor:.2f}x")
+        else:
+            logger.info("Step 8: No upscaling needed")
+        
+        # Step 9: Convert to CMYK
+        pil_image = image_to_CMYK(pil_image)
+        logger.info("Step 9: Converted to CMYK")
+        
+        # Step 10: Create PDF with cutline
+        pdf_doc = image_to_pdf_with_dimensions(pil_image, dpi)
+        
+        if to_add_cutline and add_bleed and bleed_mm > 0:
+            # Calculate cutline position in points
+            bleed_pts = (bleed_mm / 25.4) * 72
+            page = pdf_doc[0]
+            pw, ph = page.rect.width, page.rect.height
+            cutline_rect = (
+                bleed_pts,
+                bleed_pts,
+                pw - bleed_pts,
+                ph - bleed_pts
+            )
+            pdf_doc = add_cutline(pdf_doc, cutline_rect)
+            logger.info("Step 10: Added CutContour spot color cutline")
+        else:
+            if not to_add_cutline:
+                logger.info("Step 10: Cutline not requested")
+            elif not add_bleed or bleed_mm <= 0:
+                logger.info("Step 10: No cutline added (no bleed)")
+            else:
+                logger.info("Step 10: No cutline added")
+        
+        pdf_bytes = pdf_doc.tobytes()
+        
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=print_ready.pdf"
+            }
+        )
+        
+    except Exception as exc:
+        logger.exception("Step 2 failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 def _get_extension_params(strategy: str, desired_ratio: float) \
         -> tuple[int, int, bool, bool]:
@@ -2108,110 +2207,3 @@ def _get_extension_params(strategy: str, desired_ratio: float) \
         return rec_x, rec_y, False, True
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
-
-
-@app.post(f"{prefix}/process_for_print_step2")
-async def process_for_print_step2_endpoint(
-    selected_image_path: str = Form(...),
-    target_width: float = Form(...),
-    target_height: float = Form(...),
-    unit: str = Form("mm"),
-    dpi: int = Form(300),
-    add_bleed: bool = Form(True),
-    bleed_mm: float = Form(3.0),
-    add_cutline: bool = Form(False),
-):
-    """
-    Step 2: Complete processing with selected AI extension result.
-    
-    Takes the selected extended image and completes:
-    - Add mirror bleed
-    - Upscale to target DPI
-    - Convert to PDF with cutline (if requested)
-    """
-    unit = unit.strip().lower()
-    if unit == "mm":
-        target_width_mm = target_width
-        target_height_mm = target_height
-    else:
-        target_width_mm = target_width * 25.4
-        target_height_mm = target_height * 25.4
-
-    try:
-        # Load the selected extended image
-        pil_image = Image.open(selected_image_path).convert("RGB")
-        
-        # Step 7: Add mirror bleed
-        if add_bleed and bleed_mm > 0:
-            bleed_inch = bleed_mm / 25.4
-            bleed_px = calculate_desired_bleed_in_pixels(bleed_inch, dpi)
-            pil_image, x1, y1, x2, y2 = add_desired_mirror_bleed(
-                pil_image, bleed_px
-            )
-            logger.info(f"Step 7: Added {bleed_mm}mm bleed ({bleed_px}px)")
-        else:
-            w, h = pil_image.size
-            x1, y1, x2, y2 = 0, 0, w, h
-            logger.info("Step 7: No bleed added")
-        
-        # Step 8: Upscale with LANCZOS
-        desired_x_inch = target_width_mm / 25.4
-        desired_y_inch = target_height_mm / 25.4
-        desired_x_px, desired_y_px, _ = calculate_desired_pixels(
-            desired_x_inch, desired_y_inch, dpi
-        )
-        
-        actual_x_px, actual_y_px, _ = read_image_dimensions_and_ratio(
-            pil_image
-        )
-        scaling_factor = determine_scaling_factor(
-            desired_x_px, desired_y_px, actual_x_px, actual_y_px
-        )
-        
-        if scaling_factor > 1.01:
-            pil_image = upscale_with_LANCZOS(pil_image, scaling_factor)
-            logger.info(f"Step 8: Upscaled by {scaling_factor:.2f}x")
-        else:
-            logger.info("Step 8: No upscaling needed")
-        
-        # Step 9: Convert to CMYK
-        pil_image = image_to_CMYK(pil_image)
-        logger.info("Step 9: Converted to CMYK")
-        
-        # Step 10: Create PDF with cutline
-        pdf_doc = image_to_pdf_with_dimensions(pil_image, dpi)
-        
-        if add_cutline and add_bleed and bleed_mm > 0:
-            # Calculate cutline position in points
-            bleed_pts = (bleed_mm / 25.4) * 72
-            page = pdf_doc[0]
-            pw, ph = page.rect.width, page.rect.height
-            cutline_rect = (
-                bleed_pts,
-                bleed_pts,
-                pw - bleed_pts,
-                ph - bleed_pts
-            )
-            pdf_doc = add_cutline(pdf_doc, cutline_rect)
-            logger.info("Step 10: Added CutContour spot color cutline")
-        else:
-            if not add_cutline:
-                logger.info("Step 10: Cutline not requested")
-            elif not add_bleed or bleed_mm <= 0:
-                logger.info("Step 10: No cutline added (no bleed)")
-            else:
-                logger.info("Step 10: No cutline added")
-        
-        pdf_bytes = pdf_doc.tobytes()
-        
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=print_ready.pdf"
-            }
-        )
-        
-    except Exception as exc:
-        logger.exception("Step 2 failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))

@@ -818,10 +818,15 @@ export default function Home() {
     setProcessingForPrint(true);
     const form = new FormData();
     form.append("file", fileToSend);
-    form.append("target_width", String(formatDims.width));
-    form.append("target_height", String(formatDims.height));
+    form.append("target_width_mm", String(formatDims.width));
+    form.append("target_height_mm", String(formatDims.height));
     form.append("unit", globalUnit);
     form.append("dpi", String(targetDpi));
+    form.append("to_add_cutline", String(addCutline));
+
+    const bleedValueToSend = parseFloat(bleedSize) || 0;
+    form.append("add_bleed", String(bleedValueToSend > 0));
+    form.append("bleed_mm", bleedSize);
 
     try {
       // Step 1: Get AI extension parameters (doesn't do extension yet)
@@ -869,14 +874,30 @@ export default function Home() {
           strategy: data.strategy
         });
         setAvailableOverlaps(data.step2_params.overlap_percentages);
-      } else {
-        // Single-step strategy
+      } else if (data.status === "needs_extension" && data.ai_extension_params) {
+        // Single-step strategy with ai_extension_params
         setAiExtensionParams({
           isTwoStep: false,
           ...data.ai_extension_params,
           fileToSend: fileToSend
         });
         setAvailableOverlaps(data.ai_extension_params.overlap_percentages);
+      } else if (data.status === "needs_extension" && data.overlap_percentages) {
+        // Strategy needs extension but backend returned simplified response
+        // (portrait_to_square, landscape_to_square)
+        setAiExtensionParams({
+          isTwoStep: false,
+          target_width: data.target_width || 1024,
+          target_height: data.target_height || 1024,
+          overlap_horizontally: data.overlap_horizontally || false,
+          overlap_vertically: data.overlap_vertically || false,
+          fileToSend: fileToSend,
+          strategy: data.strategy
+        });
+        setAvailableOverlaps(data.overlap_percentages);
+      } else {
+        // Fallback for unknown status
+        throw new Error(`Unexpected response status: ${data.status}`);
       }
       
       // Automatically generate the first option (3%)
@@ -920,7 +941,7 @@ export default function Home() {
       const bleedValueToSend = parseFloat(bleedSize) || 0;
       form.append("add_bleed", String(bleedValueToSend > 0));
       form.append("bleed_mm", bleedSize);
-      form.append("add_cutline", String(addCutline));
+      form.append("to_add_cutline", String(addCutline));
 
       const res = await fetch(`${BACKEND_URL}/process_for_print_step2`, {
         method: "POST",
