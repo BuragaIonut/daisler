@@ -33,12 +33,7 @@ export default function Home() {
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
   const [processedType, setProcessedType] = useState<string | null>(null);
   const [processedPdfUrl, setProcessedPdfUrl] = useState<string | null>(null);
-  const [resizeWidth, setResizeWidth] = useState<string>("");
-  const [resizeHeight, setResizeHeight] = useState<string>("");
   const [resizeDpi, setResizeDpi] = useState<string>("300");
-  const [resizeUnit, setResizeUnit] = useState<string>("mm");
-  const [healthStatus, setHealthStatus] = useState<string | null>(null);
-  const [checkingHealth, setCheckingHealth] = useState(false);
   const [bleedSize, setBleedSize] = useState<string>("3");
   const [addCutline, setAddCutline] = useState<boolean>(false);
   const [processingForPrint, setProcessingForPrint] = useState(false);
@@ -55,8 +50,8 @@ export default function Home() {
   const [loadingExtensions, setLoadingExtensions] = useState(false);
   const [currentGeneratingIndex, setCurrentGeneratingIndex] = useState<number>(-1);
   const [availableOverlaps, setAvailableOverlaps] = useState<number[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [aiExtensionParams, setAiExtensionParams] = useState<any>(null);
-  const [expandedCardIndex, setExpandedCardIndex] = useState<number | null>(null);
   const [fullscreenCardIndex, setFullscreenCardIndex] = useState<number | null>(null);
   
   // Debug info state
@@ -233,11 +228,13 @@ export default function Home() {
         });
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fixedWidth, fixedHeight, cropMode, naturalSize]);
 
   // Refresh preview when selection or zoom changes
   useEffect(() => {
     refreshToSendPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection, zoom, imageSrc]);
 
   function computeCropPixelsFromSelection(sel: { x: number; y: number; width: number; height: number } | null) {
@@ -507,7 +504,12 @@ export default function Home() {
     }
   };
 
-  const generateNextExtension = async (index: number, strategyData: any, inputFile: File) => {
+  const generateNextExtension = async (
+    index: number, 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    strategyData: any, 
+    inputFile?: File
+  ) => {
     if (!strategyData || !inputFile) return;
     
     setCurrentGeneratingIndex(index);
@@ -518,6 +520,9 @@ export default function Home() {
         // Two-step strategy
         const step1Params = strategyData.step1_params;
         const step2Params = strategyData.step2_params;
+        if (!step1Params || !step2Params) {
+          throw new Error("Missing step parameters for two-step extension");
+        }
         const overlapPct = step2Params.overlap_percentages[index];
         
         console.log(`Two-step generation for ${overlapPct}%: Step 1 - Converting to square...`);
@@ -576,6 +581,9 @@ export default function Home() {
       } else {
         // Single-step strategy
         const aiParams = strategyData.ai_extension_params;
+        if (!aiParams) {
+          throw new Error("Missing AI extension parameters");
+        }
         const overlapPct = aiParams.overlap_percentages[index];
         
         console.log(`Generating AI extension for ${overlapPct}% overlap...`);
@@ -993,22 +1001,6 @@ export default function Home() {
     );
   };
 
-  const checkHealth = async () => {
-    setCheckingHealth(true);
-    setHealthStatus(null);
-    try {
-      const res = await fetch(`${BACKEND_URL}/health`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setHealthStatus(`Status: ${data.status}`);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setHealthStatus(`Error: ${message}`);
-    } finally {
-      setCheckingHealth(false);
-    }
-  };
-
   return (
     <div className="mx-auto max-w-[1800px] px-8 py-8">
       <header className="mb-8 flex justify-between items-start">
@@ -1362,8 +1354,8 @@ export default function Home() {
                     type="radio"
                     value="fixed"
                     checked={cropMode === "fixed"}
-                    onChange={(e) => {
-                      const newMode = e.target.value as "free" | "fixed";
+                    onChange={() => {
+                      const newMode = "fixed" as const;
                       setCropMode(newMode);
                       if (newMode === "fixed") {
                         // Create initial fixed-size selection in center of image
@@ -1729,7 +1721,6 @@ export default function Home() {
                       opt => Math.abs(opt.overlap_percentage - overlapPct) < 0.01
                     );
                     const isLoaded = !!option;
-                    const isExpanded = expandedCardIndex === index;
                     const isSelected = selectedOptionIndex === index;
                     const isFullscreen = fullscreenCardIndex === index;
                     const isHidden = isAnyFullscreen && !isFullscreen;
